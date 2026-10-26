@@ -1,0 +1,4 @@
+provider: github
+owner: viarotel-org
+repo: yanjiu-scrcpy
+updaterCacheDirName: yanjiu-scrcpy-updater

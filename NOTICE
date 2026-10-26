@@ -1,0 +1,4 @@
+Yanjiu-scrcpy is derived from Escrcpy by viarotel and contributors.
+Upstream source: https://github.com/viarotel-org/escrcpy
+Licensed under Apache License 2.0; see LICENSE.
+Local modifications: Android desktop/fusion modes, UI and integration improvements.

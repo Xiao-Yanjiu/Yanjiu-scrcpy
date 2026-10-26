@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.yanjiu.scrcpy.wallpaper" android:versionCode="2" android:versionName="1.1">
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="28" />
+  <application android:label="Yanjiu-scrcpy 壁纸画面" android:theme="@style/WallpaperHost" android:allowBackup="false" android:supportsRtl="true">
+    <activity android:name=".WallpaperActivity" android:exported="true" android:resizeableActivity="true" android:configChanges="orientation|screenSize|smallestScreenSize|density|keyboardHidden" android:excludeFromRecents="true">
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    </activity>
+  </application>
+</manifest>
