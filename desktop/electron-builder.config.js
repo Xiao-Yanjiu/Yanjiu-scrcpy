@@ -24,7 +24,7 @@ export default {
     {
       from: 'electron/resources/build',
       to: 'build',
-      filter: ['logo.png', 'logo.ico', 'logo.icns', 'fusion.png'],
+      filter: ['logo.png', 'logo.ico', 'logo.icns', 'fusion.png', 'fusion-monitor.png', 'fusion-monitor-tray.png'],
     },
   ],
 
@@ -44,8 +44,8 @@ export default {
 
   publish: {
     provider: 'github',
-    owner: 'viarotel-org',
-    repo: 'yanjiu-scrcpy',
+    owner: 'Xiao-Yanjiu',
+    repo: 'Yanjiu-scrcpy',
     updaterCacheDirName: 'yanjiu-scrcpy-updater',
   },
 

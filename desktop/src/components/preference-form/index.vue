@@ -131,7 +131,7 @@ watch(activeTab, () => {
 const categoryIcons = {
   common: 'M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z M9 12a3 3 0 1 0 6 0 3 3 0 1 0-6 0',
   desktop: 'M3 4h18v13H3z M8 21h8 M12 17v4',
-  fusion: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 3a4.5 4.5 0 0 1 0 9 4.5 4.5 0 0 0 0 9 M12 7h.01 M12 17h.01',
+  fusion: 'M3 4h18v13H3z M8 21h8 M12 17v4',
   video: 'M3 5h12v14H3z M15 10l6-4v12l-6-4',
   device: 'M7 2h10v20H7z M11 18h2',
   window: 'M3 4h18v16H3z M3 9h18 M7 6.5h.01 M10 6.5h.01',

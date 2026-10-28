@@ -16,6 +16,9 @@ export const files = [
   '!dist-release/**',
   '!dist-desktop-release/**',
   '!dist-desktop-final/**',
+  '!**/node_modules/@img/sharp-*/**/*',
+  '**/node_modules/@img/sharp-${platform}-${arch}/**/*',
+  '**/node_modules/@img/sharp-libvips-${platform}-${arch}/**/*',
   '!**/node_modules/@lydell/node-pty-*/**/*',
   '**/node_modules/@lydell/node-pty-*${platform}-${arch}/**/*',
 ]

@@ -5,8 +5,6 @@
     :class="{ 'theme-light': appearance === 'light', 'fusion-launcher': isFusionLauncher, 'fusion-app': isFusionApp, 'fusion-fullscreen': fusionFullscreen }"
     :style="wallpaperStyle"
     @contextmenu.self.prevent="openPanel('wallpaper')"
-    @pointerdown.capture="focusDesktopControl"
-    @focusin.capture="focusDesktopControl"
   >
     <div v-if="!isFusion && !fullscreenId" class="device-chip" data-native-overlay>
       <span class="connection-dot" :class="{ online: connected }"></span>
@@ -114,14 +112,16 @@
           <button v-if="!isFusionApp" :title="item.config.captionPinned ? '取消固定标题栏' : '固定标题栏'" :aria-pressed="!!item.config.captionPinned" @click="toggleCaptionPin(item)">
             <DeskIcon :name="item.config.captionPinned ? 'lock' : 'unlock'" />
           </button>
-          <button v-if="!isFusionApp" title="最小化" @click="minimize(item)">
+          <button title="最小化" @click="minimize(item)">
             <DeskIcon name="minimize" />
+          </button>
+          <button v-if="isFusionApp" title="最大化／还原窗口" @click="hostAction('maximize')">
+            <DeskIcon name="restore" />
           </button>
           <button :title="fusionFullscreen ? '退出全屏' : '应用全屏'" @click="enterFullscreen(item)">
             <DeskIcon :name="fusionFullscreen ? 'restore' : 'expand'" />
           </button>
           <button
-            v-if="!isFusionApp"
             class="close-action"
             title="关闭应用窗口"
             @click="closeApp(item)"
@@ -230,7 +230,7 @@
         <footer class="menu-footer">
           <span><span class="connection-dot" :class="{ online: connected }"></span>{{ device?.name || "Android" }}</span><button
             class="icon-button"
-            :title="isFusionLauncher ? '退出融合模式' : '控制中心'"
+            :title="isFusionLauncher ? '退出桌面模式' : '控制中心'"
             @click="isFusionLauncher ? hostAction('close') : openPanel('control')"
           >
             <DeskIcon :name="isFusionLauncher ? 'power' : 'settings'" />
@@ -566,7 +566,7 @@
       <div class="system-tray">
         <button
           class="tray-controls"
-          :title="isFusionLauncher ? '退出融合模式' : '控制中心'"
+          :title="isFusionLauncher ? '退出桌面模式' : '控制中心'"
           @click="isFusionLauncher ? hostAction('close') : openPanel('control')"
         >
           <DeskIcon :name="phoneState.wifi ? 'wifi' : 'monitor'" /><DeskIcon
@@ -698,13 +698,22 @@
     <div
       v-if="fullscreenId || fusionFullscreen"
       class="fullscreen-float"
-      :class="{ expanded: floatOpen }"
+      :class="{ expanded: floatOpen, dragging: floatDragging, left: floatPosition.side === 'left' }"
+      :style="{ top: `${floatPosition.y * 100}%` }"
+      data-native-overlay
+      @mouseenter="animatePanels"
+      @mouseleave="animatePanels"
     >
       <button
         class="float-ball"
         data-native-overlay
         title="桌面快捷操作"
-        @click="floatOpen = !floatOpen"
+        @pointerdown.stop.prevent="startFloatDrag"
+        @pointermove.stop="moveFloatDrag"
+        @pointerup.stop.prevent="endFloatDrag"
+        @pointercancel="cancelFloatDrag"
+        @keydown.enter.prevent="floatOpen = !floatOpen; animatePanels()"
+        @keydown.space.prevent="floatOpen = !floatOpen; animatePanels()"
       >
         <DeskIcon name="start" />
       </button>
@@ -747,7 +756,7 @@ const isFusionLauncher = fusionRole === 'launcher'
 const isFusionApp = fusionRole === 'app'
 const isFusion = isFusionLauncher || isFusionApp
 if (isFusion)
-  document.title = isFusionLauncher ? '融合模式' : (window.$preload.payload.fusionApp?.name || '手机应用')
+  document.title = isFusionLauncher ? '桌面模式' : (window.$preload.payload.fusionApp?.name || '手机应用')
 const fusionSettingsOpen = ref(false)
 const fusionCaptionHidden = ref(false)
 let fusionAppStarted = false
@@ -784,6 +793,59 @@ const fullscreenId = ref('')
 const drawerOpen = ref(false)
 const panel = ref('')
 const floatOpen = ref(false)
+const floatDragging = ref(false)
+const floatPosition = ref({ side: 'right', y: 0.45 })
+try {
+  const saved = JSON.parse(localStorage.getItem('fullscreen-float-position') || 'null')
+  if (saved && ['left', 'right'].includes(saved.side) && Number.isFinite(saved.y))
+    floatPosition.value = { side: saved.side, y: Math.max(0, Math.min(0.9, saved.y)) }
+}
+catch {}
+let floatPress = null
+function startFloatDrag(event) {
+  if (event.button !== 0)
+    return
+  floatPress = { x: event.clientX, y: event.clientY, moved: false }
+  event.currentTarget.setPointerCapture(event.pointerId)
+}
+function moveFloatDrag(event) {
+  if (!floatPress)
+    return
+  if (Math.hypot(event.clientX - floatPress.x, event.clientY - floatPress.y) > 5)
+    floatPress.moved = true
+  if (!floatPress.moved)
+    return
+  floatDragging.value = true
+  floatPosition.value = {
+    side: event.clientX < window.innerWidth / 2 ? 'left' : 'right',
+    y: Math.max(0, Math.min(window.innerHeight - 64, event.clientY - 32)) / window.innerHeight,
+  }
+  queueLayout()
+}
+function endFloatDrag(event) {
+  if (!floatPress)
+    return
+  const moved = floatPress.moved
+  floatPress = null
+  floatDragging.value = false
+  if (event.currentTarget.hasPointerCapture(event.pointerId))
+    event.currentTarget.releasePointerCapture(event.pointerId)
+  if (moved) {
+    try {
+      localStorage.setItem('fullscreen-float-position', JSON.stringify(floatPosition.value))
+    }
+    catch {}
+  }
+  else {
+    floatOpen.value = !floatOpen.value
+  }
+  animatePanels()
+}
+function cancelFloatDrag() {
+  floatPress = null
+  floatDragging.value = false
+  animatePanels()
+}
 const taskMenu = ref(null)
 const launcherMenu = ref(null)
 const shortcutPress = shallowRef(null)
@@ -821,25 +883,32 @@ const searchField = ref(null)
 const hostInputActive = ref(false)
 let hostFocusPending = null
 let hostFocusGeneration = 0
+let hostInputConfirmed = null
 function isDesktopEditor(element) {
   return element instanceof HTMLElement && Boolean(element.closest('input, textarea, select, [contenteditable="true"]'))
 }
-function requestHostInput(active = true) {
-  const pending = active && hostInputActive.value && hostFocusPending
+function requestHostInput(active = true, force = false) {
+  if (!force && hostInputActive.value === active && (hostFocusPending || hostInputConfirmed === active))
+    return hostFocusPending || Promise.resolve(true)
   hostInputActive.value = active
-  if (pending)
-    return hostFocusPending
   const generation = ++hostFocusGeneration
-  const promise = window.$preload.ipcRenderer.invoke('desktop-host-input', active).catch(() => false)
-  if (!active) {
-    hostFocusPending = null
-    return promise
-  }
-  hostFocusPending = promise.finally(() => {
-    if (generation === hostFocusGeneration)
-      hostFocusPending = null
-  })
-  return hostFocusPending
+  const promise = window.$preload.ipcRenderer.invoke('desktop-host-input', active)
+    .then((confirmed) => {
+      if (generation === hostFocusGeneration)
+        hostInputConfirmed = confirmed ? active : null
+      return confirmed
+    })
+    .catch(() => {
+      if (generation === hostFocusGeneration)
+        hostInputConfirmed = null
+      return false
+    })
+    .finally(() => {
+      if (generation === hostFocusGeneration)
+        hostFocusPending = null
+    })
+  hostFocusPending = promise
+  return promise
 }
 function searchKeydown(event) {
   if (event.key === 'Escape' || (event.ctrlKey && event.code === 'Space')) {
@@ -903,10 +972,6 @@ const clock = ref('')
 const date = ref('')
 const hostFullscreen = ref(false)
 const fusionFullscreen = computed(() => isFusionApp && hostFullscreen.value)
-function fusionOpen() {
-  if (isFusionLauncher)
-    drawerOpen.value = true
-}
 function hostFullscreenChanged(_event, value) {
   hostFullscreen.value = Boolean(value)
   queueLayout()
@@ -982,7 +1047,7 @@ watch(panel, (value, previous) => {
 })
 
 const resizeMode
-  = window.$preload.store.get('desktopMode')?.desktopResizeMode || 'aspect'
+  = window.$preload.store.get('fusionMode')?.desktopResizeMode || window.$preload.store.get('desktopMode')?.desktopResizeMode || 'aspect'
 const toast = ref('')
 const wallpaperBusy = ref(false)
 const liveWallpaper = ref(false)
@@ -1003,7 +1068,7 @@ watch([drawerOpen, panel, resolutionId, fusionSettingsOpen], ([drawer, activePan
 })
 function focusDesktopControl(event) {
   if (isDesktopEditor(event.target))
-    requestHostInput()
+    requestHostInput(true, event.type === 'pointerdown')
   else if (event.type === 'pointerdown' && !event.target.closest('[data-native-overlay]') && !drawerOpen.value && !panel.value && !resolutionId.value && !fusionSettingsOpen.value)
     requestHostInput(false)
 }
@@ -1051,6 +1116,26 @@ const preferences = reactive({
 })
 if (preferences.wallpaperSource === 'phone')
   preferences.wallpaperSource = 'phone-live'
+function fusionOpen() {
+  if (isFusionLauncher) {
+    const all = window.$preload.store.get('androidDesktop') || {}
+    preferences.appUsage = { ...(all[preferenceKey.value]?.appUsage || {}) }
+    drawerOpen.value = true
+  }
+}
+function usageChanged(_event, data) {
+  if (data?.key === preferenceKey.value)
+    preferences.appUsage = { ...data.appUsage }
+}
+async function restoreWindowInput() {
+  hostInputConfirmed = null
+  await nextTick()
+  if (drawerOpen.value || panel.value || resolutionId.value || fusionSettingsOpen.value || isDesktopEditor(document.activeElement))
+    return requestHostInput(true)
+  await requestHostInput(false)
+  if (isFusionApp && windows.value[0])
+    focusApp(windows.value[0])
+}
 const wallpaperStyle = computed(() => ({
   backgroundImage:
     (liveWallpaperFrame.value || preferences.wallpaperImage)
@@ -1456,11 +1541,12 @@ function savePreferences() {
   if (isFusionApp) {
     const pkg = window.$preload.payload.fusionApp.packageName
     next = { ...latest }
-    for (const field of ['appConfigs', 'appUsage']) next[field] = { ...latest[field], ...(preferences[field]?.[pkg] ? { [pkg]: preferences[field][pkg] } : {}) }
+    for (const field of ['appConfigs']) next[field] = { ...latest[field], ...(preferences[field]?.[pkg] ? { [pkg]: preferences[field][pkg] } : {}) }
   }
   else if (isFusionLauncher) {
-    next = { ...latest, appUsage: { ...latest.appUsage, ...next.appUsage } }
+    next = { ...latest, appUsage: { ...latest.appUsage } }
   }
+  next.appUsage = { ...(latest.appUsage || next.appUsage || {}) }
   window.$preload.store.set('androidDesktop', {
     ...all,
     [preferenceKey.value]: JSON.parse(JSON.stringify(next)),
@@ -1606,9 +1692,9 @@ function dismissOutside(event) {
 function dismissNative(_event, appId) {
   // Foreground activation can briefly blur the Electron host while it moves
   // focus from the embedded child. Keep editors alive during that handoff.
-  if (!appId && (resolutionId.value || fusionSettingsOpen.value || isDesktopEditor(document.activeElement)))
+  if ((hostInputActive.value || !appId) && (drawerOpen.value || panel.value || resolutionId.value || fusionSettingsOpen.value || isDesktopEditor(document.activeElement)))
     return
-  hostInputActive.value = false
+  requestHostInput(false)
   if (isDesktopEditor(document.activeElement))
     document.activeElement.blur()
   closeOverlays()
@@ -1712,8 +1798,8 @@ function addBanner(notice) {
   resumeBanner(id)
   queueLayout()
 }
-function focusApp(item, event) {
-  if (hostInputActive.value || drawerOpen.value || panel.value || resolutionId.value || isDesktopEditor(document.activeElement))
+async function focusApp(item, event) {
+  if (drawerOpen.value || panel.value || resolutionId.value || isDesktopEditor(document.activeElement))
     return
   if (event?.target?.closest('.app-titlebar, .resize-handle'))
     return
@@ -1727,6 +1813,8 @@ function focusApp(item, event) {
   ) {
     return
   }
+  if (!await requestHostInput(false))
+    return
   window.$preload.ipcRenderer
     .invoke('desktop-app-focus', item.id)
     .catch(error => notify(error.message))
@@ -1754,6 +1842,9 @@ function activate(item) {
   queueLayout()
 }
 function closeOverlays() {
+  if (isDesktopEditor(document.activeElement) && document.activeElement.closest('[data-native-overlay]'))
+    document.activeElement.blur()
+  requestHostInput(false)
   fusionSettingsOpen.value = false
   captionId.value = ''
   taskMenu.value = null
@@ -1925,18 +2016,17 @@ async function launch(app, options = {}) {
   }
   if (!connected.value)
     return notify('请先连接手机')
+  if (!isFusionApp) {
+    try {
+      preferences.appUsage = await window.$preload.ipcRenderer.invoke('desktop-record-app-usage', { deviceId, packageName: app.packageName })
+    }
+    catch (error) { notify(`无法更新常用应用：${error.message}`) }
+  }
   if (isFusion && !options.fusionLocal) {
     closeOverlays()
     await window.$preload.win.open('pages/desktop', { device: { ...(device.value || window.$preload.payload.device), id: deviceId }, fusionRole: 'app', fusionApp: { packageName: app.packageName, name: app.name, icon: app.icon }, fusionTaskId: options.taskId, instanceId: `fusion-app:${deviceId}:${app.packageName}` })
     return
   }
-  preferences.appUsage ||= {}
-  const usage = preferences.appUsage[app.packageName] || { count: 0 }
-  preferences.appUsage[app.packageName] = {
-    count: usage.count + 1,
-    lastUsed: Date.now(),
-  }
-  savePreferences()
   const existing = windows.value.find(
     item => item.packageName === app.packageName,
   )
@@ -2736,6 +2826,7 @@ async function readNotifications(background = false) {
     const notices = await window.$preload.ipcRenderer.invoke(
       'desktop-notifications',
       deviceId,
+      { details: background !== true || panel.value === 'notifications' },
     )
     if (request !== notificationRequest)
       return
@@ -2821,7 +2912,7 @@ async function refresh(force = false) {
       }
     }
     else {
-      if (deviceWasConnected && health.failures >= 2 && !disconnectClosing) {
+      if (deviceWasConnected && health.missing && health.failures >= 2 && !disconnectClosing) {
         disconnectClosing = true
         persistWindows()
         await window.$preload.ipcRenderer.invoke('desktop-host-action', 'close')
@@ -2871,6 +2962,10 @@ function tick() {
   date.value = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}`
 }
 function keydown(event) {
+  if (event.isComposing || event.keyCode === 229)
+    return
+  if (isDesktopEditor(event.target) && event.key !== 'Escape')
+    return
   if (event.key === 'Escape') {
     if (isFusionLauncher) {
       hostAction('minimize')
@@ -2898,7 +2993,8 @@ function keydown(event) {
 }
 async function externalApp(_event, task) {
   try {
-    await launch(apps.value.find(app => app.packageName === task.packageName) || { packageName: task.packageName, name: task.packageName }, { taskId: task.taskId, fromControl: task.fromControl })
+    const info = apps.value.find(app => app.packageName === task.packageName) || await window.$preload.ipcRenderer.invoke('desktop-application-info', { deviceId, packageName: task.packageName })
+    await launch({ ...info, name: info.name || task.packageName }, { taskId: task.taskId, fromControl: task.fromControl })
   }
   catch (error) { notify(`无法打开应用页面：${error.message}`) }
 }
@@ -2981,8 +3077,6 @@ watch(
 )
 onMounted(() => {
   tick()
-  if (isFusionLauncher)
-    drawerOpen.value = true
   window.$preload.ipcRenderer.on('fusion-launcher-blur', fusionBlur)
   window.$preload.ipcRenderer.on('fusion-launcher-open', fusionOpen)
   window.$preload.ipcRenderer.on('desktop-host-fullscreen', hostFullscreenChanged)
@@ -2991,7 +3085,7 @@ onMounted(() => {
     preferencesReady = true
     refresh(true)
   })
-  if (!isFusion)
+  if (!isFusionApp)
     notificationPollTimer = setInterval(() => readNotifications(true), 4000)
   clockTimer = setInterval(tick, 1000)
   refreshTimer = setInterval(() => refresh(), 2500)
@@ -3013,6 +3107,10 @@ onMounted(() => {
   window.addEventListener('pointercancel', pointerUp)
   window.addEventListener('keydown', keydown)
   document.addEventListener('pointerdown', dismissOutside, true)
+  document.addEventListener('pointerdown', focusDesktopControl, true)
+  document.addEventListener('focusin', focusDesktopControl, true)
+  window.addEventListener('focus', restoreWindowInput)
+  window.$preload.ipcRenderer.on('desktop-usage-changed', usageChanged)
   window.$preload.ipcRenderer.on('desktop-native-pointer', dismissNative)
   window.$preload.ipcRenderer.on('desktop-wallpaper-frame', wallpaperFrame)
   window.$preload.ipcRenderer.on('desktop-wallpaper-status', wallpaperStatus)
@@ -3048,6 +3146,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointercancel', pointerUp)
   window.removeEventListener('keydown', keydown)
   document.removeEventListener('pointerdown', dismissOutside, true)
+  document.removeEventListener('pointerdown', focusDesktopControl, true)
+  document.removeEventListener('focusin', focusDesktopControl, true)
+  window.removeEventListener('focus', restoreWindowInput)
+  window.$preload.ipcRenderer.removeListener('desktop-usage-changed', usageChanged)
   window.$preload.ipcRenderer.removeListener(
     'desktop-native-pointer',
     dismissNative,
@@ -4562,17 +4664,40 @@ select:focus-visible {
 .fullscreen-float {
   position: absolute;
   z-index: 14000;
-  right: -20px;
-  top: 45%;
+  right: 0;
+  width: 64px;
+  height: 64px;
   display: flex;
   align-items: center;
-  flex-direction: row-reverse;
-  gap: 10px;
-  transition: right 0.18s;
+  justify-content: flex-end;
 }
-.fullscreen-float:hover,
-.fullscreen-float.expanded {
-  right: 10px;
+.fullscreen-float.left {
+  right: auto;
+  left: 0;
+  justify-content: flex-start;
+}
+.fullscreen-float .float-ball {
+  flex: none;
+  transform: translateX(22px);
+  transition: transform 0.22s ease;
+  touch-action: none;
+}
+.fullscreen-float.left .float-ball {
+  transform: translateX(-22px);
+}
+.fullscreen-float:hover .float-ball,
+.fullscreen-float.expanded .float-ball,
+.fullscreen-float.dragging .float-ball {
+  transform: translateX(0);
+}
+.fullscreen-float .float-menu {
+  position: absolute;
+  right: 64px;
+  top: 0;
+}
+.fullscreen-float.left .float-menu {
+  right: auto;
+  left: 64px;
 }
 .float-ball {
   width: 44px;
@@ -5089,7 +5214,7 @@ select:focus-visible {
 }
 .fusion-app .app-titlebar.revealed {
   height: 32px;
-  padding: 0 142px 0 8px;
+  padding: 0 8px;
   gap: 6px;
   border: 0;
   border-radius: 0;

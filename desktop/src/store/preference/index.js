@@ -120,7 +120,8 @@ export const usePreferenceStore = defineStore('app-preference', () => {
 
     const params = Object.entries(mergedData).reduce((obj, [key, value]) => {
       const shouldExclude
-        = ([null, undefined, '', false].includes(value))
+        = !/^-[\w-]+$/.test(key)
+          || ([null, undefined, '', false].includes(value))
           || scrcpyExcludeKeys.value.includes(key)
           || [key, `${key}=${value}`].some(v => excludes.includes(v))
           || (!useRecord && recordKeys.value.includes(key))

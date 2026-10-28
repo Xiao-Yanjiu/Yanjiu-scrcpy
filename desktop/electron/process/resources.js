@@ -42,8 +42,9 @@ export function getExtraPlatformDirs() {
   const platformArch = platform === 'win' ? 'win' : `${platform}-${arch}`
 
   const adjacentScrcpy = resolve(dirname(process.execPath), 'scrcpy')
-  const scrcpyDir = import.meta.env.MODE === 'production' && platform === 'win'
-    && existsSync(resolve(adjacentScrcpy, 'scrcpy.exe'))
+  const scrcpyBinary = platform === 'win' ? 'scrcpy.exe' : 'scrcpy'
+  const scrcpyDir = import.meta.env.MODE === 'production' && ['win', 'linux'].includes(platform)
+    && existsSync(resolve(adjacentScrcpy, scrcpyBinary))
     ? adjacentScrcpy
     : extraResolve(`${platformArch}/scrcpy`)
 

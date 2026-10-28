@@ -1,4 +1,4 @@
-import desktop, { fusion } from './desktop/index.js'
+import { fusion } from './desktop/index.js'
 import audio from './audio/index.js'
 import camera from './camera/index.js'
 import common from './common/index.js'
@@ -11,7 +11,6 @@ import window from './window/index.js'
 
 export default {
   common,
-  desktop,
   fusion,
   video,
   device,

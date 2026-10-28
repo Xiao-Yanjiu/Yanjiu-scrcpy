@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto'
 import store from '$electron/helpers/store/index.js'
+import { registerFloatingTarget } from './window.js'
+import { extraResolve } from '$electron/process/resources.js'
 import { globalEventEmitter } from '$electron/helpers/emitter/index.js'
-import { appendFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -8,19 +11,138 @@ import { createInterface } from 'node:readline'
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   nativeImage,
   screen,
 } from 'electron'
-import { extraResolve } from '$electron/process/resources.js'
+
 import { getAdb, getScrcpy } from '$electron/configs/which/index.js'
 
 const execFileAsync = promisify(execFile)
+const desktopServerChecks = new Map()
+const clipboardRelays = new Map()
+let pendingPhoneClipboard = null
+let clipboardWriteTimer = null
+function queuePhoneClipboard(text) {
+  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 256 * 1024)
+    return
+  pendingPhoneClipboard = text
+  if (clipboardWriteTimer)
+    return
+  clipboardWriteTimer = setTimeout(() => {
+    clipboardWriteTimer = null
+    const value = pendingPhoneClipboard
+    pendingPhoneClipboard = null
+    try {
+      // Preserve PC formats/history when Ctrl+V is echoed back by Android.
+      if (clipboard.readText() !== value)
+        clipboard.writeText(value)
+    }
+    catch { sessionLog({ event: 'clipboard-write-error' }) }
+  }, 40)
+}
+function ensureClipboardRelay(owner, deviceId, server) {
+  let relay = clipboardRelays.get(deviceId)
+  if (relay) {
+    relay.owners.add(owner)
+    return relay.ready
+  }
+  relay = { owners: new Set([owner]), child: null }
+  clipboardRelays.set(deviceId, relay)
+  relay.ready = (async () => {
+    const remote = '/data/local/tmp/yanjiu-desktop-clipboard.jar'
+    await adb(deviceId, ['push', server, remote])
+    if (![...relay.owners].some(entry => !entry.closed))
+      throw new Error('Desktop closed')
+    const child = relay.child = spawn(getAdb(), ['-s', deviceId, 'shell', '-T', `CLASSPATH=${remote} app_process /system/bin com.genymobile.scrcpy.DesktopClipboardRelay`], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] })
+    child.stdin.on('error', () => {})
+    await new Promise((resolve, reject) => {
+      let ready = false
+      const timer = setTimeout(() => reject(new Error('Clipboard service timeout')), 6000)
+      const reader = createInterface({ input: child.stdout })
+      reader.on('line', (line) => {
+        if (!line.startsWith('DESKTOP_CLIPBOARD:'))
+          return
+        try {
+          const message = JSON.parse(line.slice('DESKTOP_CLIPBOARD:'.length))
+          if (message.ready) {
+            ready = true
+            clearTimeout(timer)
+            resolve()
+          }
+          else if (ready && [...relay.owners].some(entry => !entry.closed) && typeof message.text === 'string') {
+            queuePhoneClipboard(message.text)
+          }
+        }
+        catch { /* Do not log private clipboard payloads. */ }
+      })
+      const stopped = () => {
+        clearTimeout(timer)
+        reader.close()
+        if (clipboardRelays.get(deviceId) === relay)
+          clipboardRelays.delete(deviceId)
+        if (!ready)
+          reject(new Error('Clipboard service unavailable'))
+      }
+      child.once('error', stopped)
+      child.once('exit', stopped)
+    })
+    return true
+  })().catch(() => {
+    relay.child?.stdin.end()
+    relay.child?.kill()
+    if (clipboardRelays.get(deviceId) === relay)
+      clipboardRelays.delete(deviceId)
+    // Do not disable autosync: Ctrl+V and UHID paste acknowledgement rely on it.
+    sessionLog({ event: 'clipboard-relay-unavailable', fallback: 'scrcpy-autosync' })
+    return false
+  })
+  return relay.ready
+}
+function releaseClipboardRelay(owner) {
+  for (const [deviceId, relay] of clipboardRelays) {
+    relay.owners.delete(owner)
+    if (!relay.owners.size) {
+      clipboardRelays.delete(deviceId)
+      relay.child?.stdin.end()
+      relay.child?.kill()
+    }
+  }
+}
+
+async function desktopServer(binary) {
+  const stat = statSync(binary)
+  const key = `${binary}:${stat.size}:${stat.mtimeMs}`
+  if (!desktopServerChecks.has(key)) {
+    const check = (async () => {
+      const { stdout } = await execFileAsync(binary, ['--version'], { windowsHide: true, timeout: 5000, maxBuffer: 65536 })
+      if (!/^scrcpy 4\.1(?:\s|$)/m.test(stdout))
+        throw new Error('桌面输入焦点服务需要 scrcpy 4.1，请使用随程序提供的版本')
+      const file = extraResolve('common/scrcpy-server-4.1-desktop.jar')
+      const manifest = JSON.parse(readFileSync(extraResolve('common/scrcpy-server-desktop.json'), 'utf8'))
+      if (createHash('sha256').update(readFileSync(file)).digest('hex') !== manifest.sha256)
+        throw new Error('桌面输入焦点服务校验失败，请恢复完整程序文件')
+      return file
+    })()
+    desktopServerChecks.set(key, check)
+    check.catch(() => desktopServerChecks.delete(key))
+  }
+  return desktopServerChecks.get(key)
+}
 const owners = new Map()
 const agentReady = new Map()
 const connectionHealth = new Map()
+const taskStreams = new Map()
+const taskStreamStarts = new Map()
+const deviceInputFocus = new Map()
+const latestInputIntent = new Map()
+const batteryReadings = new Map()
 const notificationApps = new Map()
+const notificationReads = new Map()
+const notificationDetails = new Map()
+const routedCalls = new Map()
 const controlId = '__desktop_control__'
 let notificationActionQueue = Promise.resolve()
 const agentRemote = '/data/local/tmp/yanjiu-scrcpy-desktop-agent.jar'
@@ -96,6 +218,19 @@ async function deviceConnection(deviceId) {
     catch (failure) {
       error = failure.stderr || failure.message || String(failure)
     }
+    // A slow get-state command is not proof that the cable was unplugged.
+    // Confirm against the shared ADB server before closing any app windows.
+    let missing = false
+    if (status !== 'device') {
+      try {
+        const listing = await execFileAsync(getAdb(), ['devices'], { windowsHide: true, timeout: 4000 })
+        const row = listing.stdout.split(/\r?\n/).map(line => line.trim().split(/\s+/)).find(parts => parts[0] === deviceId)
+        missing = !row
+        if (row?.[1] === 'device')
+          status = 'device'
+      }
+      catch { /* Keep windows alive when the ADB server itself is slow. */ }
+    }
     if (status !== 'device' && deviceId.includes(':')) {
       const backoff = Math.min(15000, 1000 * 2 ** Math.min(4, state.failures))
       if (Date.now() - state.lastConnect >= backoff) {
@@ -113,7 +248,7 @@ async function deviceConnection(deviceId) {
         agentReady.delete(deviceId)
     }
     state.checked = Date.now()
-    state.result = { id: deviceId, status, failures: state.failures }
+    state.result = { id: deviceId, status, failures: state.failures, missing }
     return state.result
   })()
   try {
@@ -172,24 +307,31 @@ class NativeBridge {
   constructor(win) {
     this.sequence = 0
     this.pending = new Map()
-    const handle = win.getNativeWindowHandle().readBigUInt64LE().toString()
+    const nativeHandle = win.getNativeWindowHandle()
+    const handle = (nativeHandle.length >= 8 ? nativeHandle.readBigUInt64LE() : nativeHandle.readUInt32LE()).toString()
+    const linux = process.platform === 'linux'
     this.child = spawn(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        extraResolve('win/desktop-window.ps1'),
-        '-ParentHandle',
-        handle,
-      ],
+      linux ? 'python3' : 'powershell.exe',
+      linux
+        ? ['-u', extraResolve('linux/desktop-window.py'), handle]
+        : [
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            extraResolve('win/desktop-window.ps1'),
+            '-ParentHandle',
+            handle,
+          ],
       { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
     )
     this.ready = new Promise((resolve, reject) => {
       const timeout = setTimeout(
-        () => reject(new Error('桌面窗口服务启动超时')),
+        () => {
+          this.fail(new Error('桌面窗口服务启动超时'))
+          this.child.kill()
+        },
         20000,
       )
       this.finishReady = (error) => {
@@ -233,7 +375,11 @@ class NativeBridge {
         ? pending.reject(new Error(message.error))
         : pending.resolve(message.result)
     })
-    const failed = (error) => {
+    const failed = this.fail = (error) => {
+      if (this.failure)
+        return
+      this.failure = error
+      sessionLog({ event: 'native-bridge-error', error: error.message })
       this.finishReady(error)
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer)
@@ -245,11 +391,17 @@ class NativeBridge {
     this.child.on('exit', () =>
       failed(new Error(errors || '桌面窗口服务已关闭')),
     )
-    this.child.stdin.on('error', () => {})
+    this.child.stdin.on('error', failed)
+    this.child.stdout.on('error', failed)
+    this.child.stderr.on('error', failed)
   }
 
   async request(command, data = {}) {
+    if (this.failure)
+      throw this.failure
     await this.ready
+    if (this.failure)
+      throw this.failure
     if (this.child.exitCode !== null || this.child.killed)
       throw new Error('桌面窗口服务已关闭')
     const id = ++this.sequence
@@ -264,6 +416,7 @@ class NativeBridge {
   }
 
   close() {
+    this.fail(new Error('桌面窗口服务已关闭'))
     this.reader.close()
     this.child.stdin.end()
     this.child.kill()
@@ -430,9 +583,87 @@ function emit(owner, channel, data) {
 function stopTaskStream(owner) {
   const state = owner.tasks
   owner.tasks = null
-  state?.reader.close()
-  state?.child.stdin.end()
-  state?.child.kill()
+  if (!state)
+    return
+  state.owners.delete(owner)
+  if (!state.owners.size)
+    state.stop()
+}
+function recordAppUsage(deviceId, packageName) {
+  const key = store.get('androidDesktopIdentities')?.[deviceId] || deviceId
+  const all = store.get('androidDesktop') || {}
+  const entry = all[key] || all[deviceId] || {}
+  const usage = entry.appUsage || {}
+  const previous = usage[packageName] || { count: 0 }
+  if (Date.now() - (previous.lastUsed || 0) < 1000)
+    return usage
+  const next = { ...usage, [packageName]: { count: (Number(previous.count) || 0) + 1, lastUsed: Date.now() } }
+  store.set('androidDesktop', { ...all, [key]: { ...entry, appUsage: next } })
+  return next
+}
+async function syncAndroidInputFocus(owner, id, restoreIme = false) {
+  const session = owner.sessions.get(id)
+  if (!session || (owner.hostInput && !session.mirror) || !Number.isInteger(session.displayId) || session.displayId < 0 || owner.closed)
+    return false
+  const intent = Symbol('focus')
+  session.focusIntent = intent
+  const deviceIntent = { owner, id, intent }
+  latestInputIntent.set(session.deviceId, deviceIntent)
+  await ensureTaskStream(owner, session.deviceId)
+  if (latestInputIntent.get(session.deviceId) !== deviceIntent || owner.closed)
+    return false
+  const stream = owner.tasks
+  if (!stream || owner.sessions.get(id) !== session || (owner.hostInput && !session.mirror))
+    return false
+  let state = deviceInputFocus.get(session.deviceId)
+  if (!state) {
+    state = { generation: 0 }
+    deviceInputFocus.set(session.deviceId, state)
+  }
+  const key = `${session.displayId}:${session.packageName}`
+  restoreIme ||= Boolean(session.refreshIme) || state.key !== key || state.stream !== stream
+  if (!restoreIme && state.key === key && state.stream === stream)
+    return true
+  if (state.pendingKey === key && state.pending)
+    return state.pending
+  const generation = ++state.generation
+  const requestId = ++stream.sequence
+  const pending = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      stream.pending.delete(requestId)
+      reject(new Error('手机未确认输入焦点，请检查当前应用是否仍在虚拟显示器中'))
+    }, 2500)
+    stream.pending.set(requestId, { resolve, reject, timer })
+    stream.child.stdin.write(`${JSON.stringify({ id: requestId, command: 'focus-display', displayId: session.displayId, packageName: session.packageName, restoreIme })}\n`, (error) => {
+      if (error) {
+        clearTimeout(timer)
+        stream.pending.delete(requestId)
+        reject(error)
+      }
+    })
+  }).then((result) => {
+    if (result?.imeWarning)
+      throw new Error(`手机输入法显示策略未能恢复：${result.imeWarning}`)
+    if (result?.focused !== true)
+      throw new Error('手机未确认应用输入焦点')
+    if (state.generation === generation && latestInputIntent.get(session.deviceId)?.owner === owner && latestInputIntent.get(session.deviceId)?.id === id && owner.sessions.get(id) === session && !(owner.hostInput && !session.mirror)) {
+      state.key = key
+      state.stream = stream
+      session.refreshIme = false
+      if (!session.mirror)
+        recordAppUsage(session.deviceId, session.packageName)
+      sessionLog({ event: 'input-focus', packageName: session.packageName, displayId: session.displayId, keyboard: session.keyboardMode })
+    }
+    return true
+  }).finally(() => {
+    if (state.pending === pending) {
+      state.pending = null
+      state.pendingKey = null
+    }
+  })
+  state.pending = pending
+  state.pendingKey = key
+  return pending
 }
 function taskSignature(task) {
   return task ? `${task.taskId}:${task.displayId}:${task.component}:${task.focused}` : ''
@@ -454,13 +685,13 @@ function routeTasks(owner, tasks) {
     const before = previous.find(item => item.taskId === task.taskId)
     if (taskSignature(before) === taskSignature(task))
       continue
-    if (owner.win.fusionRole === 'launcher')
-      continue
     const source = [...owner.sessions.entries()].find(([id, session]) => id !== controlId && session.displayId === task.displayId)
     const fromControl = task.displayId === 0 && owner.control?.visible && Date.now() < (owner.control.interactingUntil || 0)
     if ((task.floating && (fromControl || source)) || (fromControl && task.focused === false))
       continue
     const call = task.displayId === 0 && /^(?:com\.tencent\.(?:mm|mobileqq)|com\.android\.(?:incallui|dialer|server\.telecom)|com\.(?:miui|google\.android)\.(?:incallui|dialer))$/.test(task.packageName) && /incall|voip|multitalk|calling|VideoActivity|AVActivity/i.test(task.component)
+    if (owner.win.fusionRole === 'launcher' && !call)
+      continue
     if (!fromControl && !call && (!source || source[1].packageName === task.packageName))
       continue
     // System overlays stay in their source stream. Only an actual Activity task moves.
@@ -474,6 +705,23 @@ function routeTasks(owner, tasks) {
       }
       continue
     }
+    if (call && owner.win.fusionRole) {
+      const deviceId = owner.tasks?.deviceId
+      const key = `${deviceId}:${task.taskId}`
+      if (Date.now() - (routedCalls.get(key) || 0) < 5000)
+        continue
+      routedCalls.set(key, Date.now())
+      if (routedCalls.size > 128)
+        routedCalls.delete(routedCalls.keys().next().value)
+      const existing = [...owners.values()].find(candidate => !candidate.closed && candidate.win.fusionRole === 'app' && [...candidate.sessions.values()].some(session => session.deviceId === deviceId && session.packageName === task.packageName && session.displayId > 0))
+      if (existing) {
+        if (existing.win.isMinimized())
+          existing.win.restore()
+        existing.win.show()
+        existing.win.webContents.send('fusion-attach-task', task.taskId)
+        continue
+      }
+    }
     owner.routedTasks ||= new Map()
     const signature = taskSignature(task)
     if (owner.routedTasks.get(task.taskId)?.signature === signature)
@@ -483,45 +731,82 @@ function routeTasks(owner, tasks) {
   }
 }
 async function ensureTaskStream(owner, deviceId) {
-  if (owner.tasks?.deviceId === deviceId || owner.closed)
+  if (owner.closed || owner.tasks?.deviceId === deviceId)
     return
-  if (owner.taskStarting)
-    return owner.taskStarting
-  const pending = (async () => {
-    const snapshot = await agent(deviceId, 'tasks')
-    if (owner.closed)
-      return
-    stopTaskStream(owner)
-    owner.taskSnapshot = snapshot.tasks || []
-    owner.tasksSeeded = true
-    const child = spawn(getAdb(), ['-s', deviceId, 'shell', '-T', `CLASSPATH=${agentRemote} app_process /system/bin dev.yanjiu.scrcpy.desktop.Agent task-stream`], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] })
-    const reader = createInterface({ input: child.stdout })
-    const state = { child, reader, deviceId }
-    owner.tasks = state
-    child.stdin.on('error', () => {})
-    reader.on('line', (line) => {
-      if (owner.tasks !== state || !line.startsWith('DESKTOP_TASKS:'))
-        return
-      try {
-        routeTasks(owner, JSON.parse(line.slice('DESKTOP_TASKS:'.length)).tasks || [])
-      }
-      catch {}
-    })
-    const ended = () => {
-      if (owner.tasks === state)
-        stopTaskStream(owner)
+  stopTaskStream(owner)
+  let state = taskStreams.get(deviceId)
+  if (!state) {
+    let starting = taskStreamStarts.get(deviceId)
+    if (!starting) {
+      starting = (async () => {
+        const snapshot = await agent(deviceId, 'tasks')
+        const child = spawn(getAdb(), ['-s', deviceId, 'shell', '-T', `CLASSPATH=${agentRemote} app_process /system/bin dev.yanjiu.scrcpy.desktop.Agent task-stream`], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] })
+        const reader = createInterface({ input: child.stdout })
+        const current = { child, reader, deviceId, owners: new Set(), snapshot: snapshot.tasks || [], pending: new Map(), sequence: 0 }
+        current.stop = () => {
+          if (taskStreams.get(deviceId) !== current)
+            return
+          taskStreams.delete(deviceId)
+          deviceInputFocus.delete(deviceId)
+          reader.close()
+          for (const subscriber of current.owners) {
+            if (subscriber.tasks === current)
+              subscriber.tasks = null
+          }
+          current.owners.clear()
+          for (const pending of current.pending.values()) {
+            clearTimeout(pending.timer)
+            pending.reject(new Error('手机输入焦点通道已断开'))
+          }
+          current.pending.clear()
+          child.kill()
+        }
+        taskStreams.set(deviceId, current)
+        child.stdin.on('error', () => {})
+        reader.on('line', (line) => {
+          if (taskStreams.get(deviceId) !== current)
+            return
+          try {
+            if (line.startsWith('DESKTOP_TASKS:')) {
+              current.snapshot = JSON.parse(line.slice('DESKTOP_TASKS:'.length)).tasks || []
+              for (const subscriber of current.owners)
+                routeTasks(subscriber, current.snapshot)
+            }
+            else if (line.startsWith('DESKTOP_INPUT:')) {
+              const result = JSON.parse(line.slice('DESKTOP_INPUT:'.length))
+              const pending = current.pending.get(result.id)
+              if (pending) {
+                clearTimeout(pending.timer)
+                current.pending.delete(result.id)
+                result.error ? pending.reject(new Error(result.error)) : pending.resolve(result)
+              }
+            }
+          }
+          catch (error) { sessionLog({ event: 'task-stream-message', error: error.message }) }
+        })
+        child.once('exit', current.stop)
+        child.once('error', current.stop)
+        return current
+      })()
+      taskStreamStarts.set(deviceId, starting)
+      starting.finally(() => {
+        if (taskStreamStarts.get(deviceId) === starting)
+          taskStreamStarts.delete(deviceId)
+      }).catch(() => {})
     }
-    child.once('exit', ended)
-    child.once('error', ended)
-  })()
-  owner.taskStarting = pending
-  try {
-    await pending
+    state = await starting
   }
-  finally {
-    if (owner.taskStarting === pending)
-      owner.taskStarting = null
+  if (owner.closed) {
+    if (!state.owners.size)
+      state.stop()
+    return
   }
+  if (taskStreams.get(deviceId) !== state)
+    throw new Error('手机任务通道已结束，请稍后重试')
+  state.owners.add(owner)
+  owner.tasks = state
+  owner.taskSnapshot = state.snapshot
+  owner.tasksSeeded = true
 }
 const quickIconCache = new Map()
 function parseQuickTiles(output, specs) {
@@ -600,15 +885,73 @@ function storeQuickDialog(owner, result) {
 async function focusDesktopInput(event, active = true) {
   const win = desktopWindow(event)
   const owner = owners.get(event.sender.id)
+  active = Boolean(active)
   if (owner) {
-    owner.hostInput = Boolean(active)
-    await owner.bridge.request('host-input', { active: Boolean(active) })
+    owner.hostInput = active
+    const generation = owner.hostFocusGeneration = (owner.hostFocusGeneration || 0) + 1
+    const transition = (owner.hostFocusPending || Promise.resolve()).catch(() => {}).then(async () => {
+      if (owner.closed || generation !== owner.hostFocusGeneration)
+        return false
+      try {
+        // Reapply even an equal value: newly attached SDL windows may need repair.
+        await owner.bridge.request('host-input', { active })
+        if (owner.closed || generation !== owner.hostFocusGeneration)
+          return false
+        if (active) {
+          win.focusOnWebView()
+          win.webContents.focus()
+        }
+        else {
+          owner.focused = null
+          owner.focusRetryAt = 0
+        }
+        return true
+      }
+      catch (error) {
+        if (generation === owner.hostFocusGeneration) {
+          owner.hostInput = false
+          owner.focused = null
+          // An IPC timeout does not mean EnableWindow was not applied.
+          await owner.bridge.request('host-input', { active: false }).catch(() => {})
+        }
+        throw error
+      }
+    })
+    owner.hostFocusPending = transition
+    return transition
   }
   if (active) {
     win.focusOnWebView()
     win.webContents.focus()
   }
   return true
+}
+
+async function confirmAppInputFocus(owner, id) {
+  if (owner.inputFocusPending || (owner.hostInput && !owner.sessions.get(id)?.mirror) || owner.closed)
+    return false
+  const request = syncAndroidInputFocus(owner, id)
+  owner.inputFocusPending = request
+  try {
+    const confirmed = await request
+    // Never cache an Android focus attempt as a successful switch.
+    if (confirmed && (!owner.hostInput || owner.sessions.get(id)?.mirror) && !owner.closed
+      && await owner.bridge.request('active') === id) {
+      owner.focused = id
+      owner.focusRetryAt = 0
+      return true
+    }
+    return false
+  }
+  catch (error) {
+    owner.focusRetryAt = Date.now() + 1000
+    sessionLog({ event: 'input-focus-error', error: error.message })
+    return false
+  }
+  finally {
+    if (owner.inputFocusPending === request)
+      owner.inputFocusPending = null
+  }
 }
 function ownerFor(event) {
   const win = desktopWindow(event)
@@ -627,9 +970,17 @@ function ownerFor(event) {
     hostInput: false,
   }
   owners.set(key, owner)
-  win.on('blur', () => emit(owner, 'desktop-native-pointer', ''))
+  win.on('blur', () => {
+    owner.focused = null
+    for (const session of owner.sessions.values())
+      session.refreshIme = true
+    emit(owner, 'desktop-native-pointer', '')
+  })
   owner.bridge.onPointerDown = (id) => {
-    owner.hostInput = false
+    if ((owner.hostInput && !owner.sessions.get(id)?.mirror) || owner.closed)
+      return
+    owner.focusRetryAt = 0
+    confirmAppInputFocus(owner, id)
     emit(owner, 'desktop-native-pointer', id)
   }
   owner.bridge.onRightBack = (id) => {
@@ -655,13 +1006,39 @@ function ownerFor(event) {
       )
   }
   owner.focusTimer = setInterval(async () => {
-    if (owner.closed || !owner.sessions.size)
+    if (owner.closed || !owner.sessions.size || owner.focusChecking)
       return
-    const id = await owner.bridge.request('active').catch(() => '')
-    if (!owner.hostInput && id && id !== owner.focused) {
-      owner.focused = id
-      emit(owner, 'desktop-app-activated', id)
+    owner.focusChecking = true
+    try {
+      const id = await owner.bridge.request('active').catch(() => '')
+      if (owner.closed)
+        return
+      if (!id)
+        owner.focused = null
+      if (process.platform === 'win32' && win.fusionRole === 'app' && !app.bossHidden && !win.floatingTransition && win.isVisible() && !win.isFocused() && !owner.coverageChecking) {
+        owner.coverageChecking = true
+        const covered = await owner.bridge.request('covered').catch(() => false).finally(() => {
+          owner.coverageChecking = false
+        })
+        owner.coveredSince = covered ? owner.coveredSince || Date.now() : 0
+        if (owner.coveredSince && Date.now() - owner.coveredSince > 900) {
+          owner.coveredSince = 0
+          await win.fusionMinimize?.()
+        }
+      }
+      else {
+        owner.coveredSince = 0
+      }
+      if ((!owner.hostInput || owner.sessions.get(id)?.mirror) && id && id !== owner.focused && Date.now() >= (owner.focusRetryAt || 0)) {
+        confirmAppInputFocus(owner, id)
+        emit(owner, 'desktop-app-activated', id)
+      }
     }
+    catch (error) {
+      if (!owner.closed)
+        sessionLog({ event: 'focus-poll-error', error: error.message })
+    }
+    finally { owner.focusChecking = false }
   }, 450)
   for (const name of ['hide', 'minimize', 'show', 'restore'])
     win.on(name, () => pauseWallpaper(owner))
@@ -671,6 +1048,7 @@ function ownerFor(event) {
     stopTaskStream(owner)
     stopWallpaper(owner)
     owner.closed = true
+    releaseClipboardRelay(owner)
     owner.phoneMirror?.kill()
     clearInterval(owner.focusTimer)
     for (const id of owner.sessions.keys()) closeSession(owner, id)
@@ -866,18 +1244,40 @@ function parsePhoneNotifications(output) {
     .filter(notice => notice.packageName && (notice.title || notice.text))
     .slice(0, 80)
 }
-async function readPhoneNotifications(deviceId) {
+function readPhoneNotifications(deviceId, details = true) {
+  // Concurrent readers share one device snapshot. A manual detail refresh waits
+  // for a background snapshot rather than starting a second pair of ADB jobs.
+  const pending = notificationReads.get(deviceId)
+  if (pending) {
+    if (details && !pending.details)
+      return pending.promise.then(() => readPhoneNotifications(deviceId, true))
+    return pending.promise
+  }
+  const state = { details }
+  state.promise = collectPhoneNotifications(deviceId, details).finally(() => {
+    if (notificationReads.get(deviceId) === state)
+      notificationReads.delete(deviceId)
+  })
+  notificationReads.set(deviceId, state)
+  return state.promise
+}
+async function collectPhoneNotifications(deviceId, details) {
   const output = await adb(deviceId, [
     'shell',
     'dumpsys notification --noredact',
   ])
   let notices = parsePhoneNotifications(output).filter(item => !item.summary && !item.hidden && item.importance > 0)
-  const [shadeDump, dismissibilityDump] = await Promise.all([
-    adb(deviceId, ['shell', 'dumpsys activity service com.android.systemui/.SystemUIService ShadeListBuilder'], { timeout: 5000 }).catch(() => ''),
-    adb(deviceId, ['shell', 'dumpsys activity service com.android.systemui/.SystemUIService NotificationDismissibilityProvider'], { timeout: 5000 }).catch(() => ''),
-  ])
-  const nonDismissible = parseNotificationDismissibility(dismissibilityDump)
-  const shade = parseShadeNotifications(shadeDump)
+  let detail = notificationDetails.get(deviceId)
+  if (details && (!detail || Date.now() - detail.time > 30000)) {
+    // Read these only for the notification panel/actions, sequentially. A stale
+    // shade list must not hide newly arrived notifications from background toasts.
+    const shadeDump = await adb(deviceId, ['shell', 'dumpsys activity service com.android.systemui/.SystemUIService ShadeListBuilder'], { timeout: 2500 }).catch(() => '')
+    const dismissibilityDump = await adb(deviceId, ['shell', 'dumpsys activity service com.android.systemui/.SystemUIService NotificationDismissibilityProvider'], { timeout: 2500 }).catch(() => '')
+    detail = { time: Date.now(), nonDismissible: parseNotificationDismissibility(dismissibilityDump), shade: parseShadeNotifications(shadeDump) }
+    notificationDetails.set(deviceId, detail)
+  }
+  const nonDismissible = details ? detail?.nonDismissible : null
+  const shade = details && detail && Date.now() - detail.time < 2000 ? detail.shade : null
   if (shade) {
     const records = new Map(notices.map(item => [item.key, item]))
     notices = shade.filter(item => !item.summary && records.has(item.key)).map(item => ({ ...records.get(item.key), groupId: item.groupId }))
@@ -896,12 +1296,14 @@ async function readPhoneNotifications(deviceId) {
   const info = Object.fromEntries(
     packages.map(pkg => [pkg, notificationApps.get(`${deviceId}:${pkg}`)]),
   )
-  return notices.map(item => ({
+  const result = notices.map(item => ({
     ...item,
     dismissible: nonDismissible ? !nonDismissible.has(item.key) : !item.ongoing,
     appName: info[item.packageName]?.name || item.packageName,
     icon: info[item.packageName]?.icon || '',
   }))
+  globalEventEmitter.emit('desktop:notification-snapshot', { deviceId, notices: result })
+  return result
 }
 async function deviceLayout(deviceId) {
   const output = await adb(serial(deviceId), ['shell', 'wm size; wm density'])
@@ -1006,12 +1408,19 @@ async function startSession(owner, request) {
     = control || request.config?.layout === 'device'
       ? await deviceLayout(deviceId)
       : displaySpec(request.config)
-  const desktopPrefs = store.get('desktopMode') || {}
+  const desktopPrefs = { ...store.get('desktopMode'), ...(owner.win.fusionRole ? store.get('fusionMode') : {}) }
   const screenOff = owner.win.fusionRole ? store.get('fusionMode.fusionScreenOff') : desktopPrefs.desktopScreenOff
   const inputModes = new Set(['sdk', 'uhid', 'disabled'])
+  const keyboardMode = request.config?.keyboard || desktopPrefs.desktopKeyboard || 'sdk'
+  const mouseMode = request.config?.mouse || desktopPrefs.desktopMouse || 'sdk'
+  if (!inputModes.has(keyboardMode) || !inputModes.has(mouseMode))
+    throw new Error('应用输入模式无效，请在设置中重新选择；未自动切换输入模式')
   const binary = getScrcpy()
   if (!binary)
     throw new Error('没有找到 scrcpy')
+  const server = !background && !control ? await desktopServer(binary) : null
+  if (server)
+    await ensureClipboardRelay(owner, deviceId, server)
   const child = spawn(
     binary,
     [
@@ -1025,20 +1434,20 @@ async function startSession(owner, request) {
       ...(control ? [] : ['--display-ime-policy=local']),
       ...(background || control ? [] : ['--no-vd-system-decorations']),
       '--max-fps=60',
-      `--mouse=${!control && inputModes.has(request.config?.mouse || desktopPrefs.desktopMouse) ? (request.config?.mouse || desktopPrefs.desktopMouse) : 'sdk'}`,
-      `--keyboard=${!control && inputModes.has(request.config?.keyboard || desktopPrefs.desktopKeyboard) ? (request.config?.keyboard || desktopPrefs.desktopKeyboard) : 'sdk'}`,
+      `--mouse=${mouseMode}`,
+      `--keyboard=${keyboardMode}`,
       ...(screenOff ? ['--no-power-on'] : []),
       ...(control ? ['--display-id=0', '--max-size=1440'] : [`--new-display=${config.width}x${config.height}/${config.dpi}`, ...(request.taskId ? [] : [`--start-app=${packageName}`])]),
     ],
     {
-      env: { ...process.env, ADB: getAdb() },
+      env: { ...process.env, ADB: getAdb(), ...(server ? { SCRCPY_SERVER_PATH: server } : {}), ...(process.platform === 'win32' && keyboardMode === 'uhid' ? { SDL_WINDOWS_RAW_KEYBOARD: '1' } : {}) },
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
   const session = {
     child,
-    config,
+    config: { ...request.config, ...config },
     deviceId,
     packageName,
     displayId: control ? 0 : null,
@@ -1046,6 +1455,8 @@ async function startSession(owner, request) {
     log: '',
     deliberate: false,
     rightBack: Boolean(request.rightBack),
+    keyboardMode,
+    mouseMode,
   }
   owner.sessions.set(id, session)
   const collect = (buffer) => {
@@ -1069,6 +1480,7 @@ async function startSession(owner, request) {
   }
   child.on('error', (error) => {
     session.error = error.message
+    sessionLog({ event: 'app-spawn-error', packageName, error: error.message })
   })
   child.on('exit', (code, signal) => {
     sessionLog({
@@ -1098,13 +1510,22 @@ async function startSession(owner, request) {
   })
   try {
     let attached = false
-    for (let attempt = 0; attempt < 160; attempt++) {
+    for (let attempt = 0;
+      attempt < 160;
+      attempt++) {
       if (owner.closed || !owner.sessions.has(id) || session.error)
         throw new Error(session.error || session.log || '应用已关闭')
+      // SDL creates its HWND before Android finishes creating the display and
+      // encoder. Do not return a half-started session or reparent it mid-startup.
+      if (!session.frameSize || !Number.isInteger(session.displayId)) {
+        await delay(100)
+        continue
+      }
       attached = await owner.bridge.request('attach', {
         appId: id,
         pid: child.pid,
         title: `Yanjiu-scrcpy Desktop ${id}`,
+        keyboard: keyboardMode,
       })
       if (attached)
         break
@@ -1148,6 +1569,7 @@ async function startSession(owner, request) {
     }
   }
   catch (error) {
+    sessionLog({ event: 'app-start-error', packageName, error: error.stack || error.message, log: session.log })
     closeSession(owner, id)
     throw error
   }
@@ -1183,7 +1605,7 @@ async function changeHostFullscreen(win, enabled) {
   finally {
     win.fusionShapeSuspended = false
     win.emit('fusion-refresh-shape')
-    if (!hostIsFullscreen(win) && store.get('desktopMode.desktopResizeMode') !== 'adaptive')
+    if (!hostIsFullscreen(win) && (store.get('fusionMode.desktopResizeMode') || store.get('desktopMode.desktopResizeMode')) !== 'adaptive')
       win.setAspectRatio(win.fusionRatio || 0, win.fusionRatioExtra || { width: 0, height: 0 })
   }
   return win.isFullScreen()
@@ -1237,6 +1659,39 @@ async function syncLayout(owner) {
 export default {
   name: 'module:desktop:embed',
   apply() {
+    process.on('uncaughtExceptionMonitor', (error, origin) => {
+      sessionLog({ event: 'main-process-fatal', origin, error: error.stack || error.message })
+    })
+    app.on('child-process-gone', (_event, details) => sessionLog({ event: 'child-process-gone', ...details }))
+    app.on('render-process-gone', (_event, contents, details) => sessionLog({ event: 'renderer-gone', url: contents.getURL(), ...details }))
+    const legacyInput = store.get('desktopMode') || {}
+    const fusionInput = { ...store.get('fusionMode') }
+    let migratedInput = false
+    for (const key of ['desktopMouse', 'desktopKeyboard', 'desktopResizeMode']) {
+      if (fusionInput[key] == null && legacyInput[key] != null) {
+        fusionInput[key] = legacyInput[key]
+        migratedInput = true
+      }
+    }
+    if (migratedInput)
+      store.set('fusionMode', fusionInput)
+
+    store.onDidChange('androidDesktop', (all) => {
+      for (const owner of owners.values()) {
+        if (owner.closed || owner.win.fusionRole === 'app')
+          continue
+        const deviceId = owner.win.fusionDeviceId || owner.audioDeviceId || owner.tasks?.deviceId
+        const key = store.get('androidDesktopIdentities')?.[deviceId] || deviceId
+        if (key && all?.[key])
+          emit(owner, 'desktop-usage-changed', { key, appUsage: all[key].appUsage || {} })
+      }
+    })
+    ipcMain.handle('desktop-record-app-usage', (event, { deviceId, packageName }) => {
+      desktopWindow(event)
+      if (!/^[\w.]{1,180}$/.test(packageName || ''))
+        throw new Error('应用标识无效')
+      return recordAppUsage(serial(deviceId), packageName)
+    })
     globalEventEmitter.on('boss:visibility', (hidden) => {
       for (const owner of owners.values()) {
         if (owner.phoneMirror && !owner.phoneMirror.killed && owner.phoneMirror.exitCode === null) {
@@ -1255,73 +1710,188 @@ export default {
         }
       })
     }
-    const applyMaterial = (win) => {
-      if (process.platform !== 'win32' || win.isDestroyed() || win.roundedGlass)
-        return
-      try {
-        win.setBackgroundColor('#00000000')
-        win.setBackgroundMaterial('acrylic')
-      }
-      catch {}
-    }
-    for (const win of BrowserWindow.getAllWindows()) applyMaterial(win)
-    app.on('browser-window-created', (_event, win) => applyMaterial(win))
     ipcMain.handle('desktop-phone-mirror', async (event, deviceId) => {
       if (app.bossHidden)
         return false
       const owner = ownerFor(event)
       deviceId = serial(deviceId)
+      if (owner.mirrorOpening)
+        return owner.mirrorOpening
       if (owner.phoneMirror && !owner.phoneMirror.killed && owner.phoneMirror.exitCode === null) {
-        await owner.bridge.request('mirror-focus', { pid: owner.phoneMirror.pid, title: '手机镜像' })
-        return true
+        const focused = await owner.bridge.request('mirror-focus', { pid: owner.phoneMirror.pid, title: '手机镜像' })
+        if (focused)
+          return true
+        throw new Error('手机镜像进程仍在运行，但窗口不可用；请关闭残留镜像后重试')
       }
-      const settings = store.get('desktopMode') || {}
-      const screenOff = owner.win.fusionRole ? store.get('fusionMode.fusionScreenOff') : settings.desktopScreenOff
-      if (screenOff)
-        ensureScreenSession(owner, deviceId)
-      // The mode's dedicated screen controller restores power on final exit.
-      // A temporary mirror must not run its own power restoration when closed.
-      const child = spawn(getScrcpy(), [`--serial=${deviceId}`, '--display-id=0', '--force-adb-forward', '--window-title=手机镜像', '--no-audio', '--max-fps=60', '--keyboard=sdk', '--mouse=sdk', ...(screenOff ? ['--no-power-on', '--no-cleanup', '--turn-screen-off'] : [])], { windowsHide: true, env: { ...process.env, ADB: getAdb() }, stdio: ['ignore', 'pipe', 'pipe'] })
-      owner.phoneMirror = child
-      await new Promise((resolve, reject) => {
-        let timer
-        let settled = false
-        let log = ''
-        const finish = (error) => {
-          if (settled)
-            return
-          settled = true
-          clearTimeout(timer)
-          error ? reject(error) : resolve()
+      const opening = (async () => {
+        const settings = { ...store.get('desktopMode'), ...(owner.win.fusionRole ? store.get('fusionMode') : {}) }
+        const keyboardMode = settings.desktopKeyboard || 'sdk'
+        const mouseMode = settings.desktopMouse || 'sdk'
+        if (![keyboardMode, mouseMode].every(mode => ['sdk', 'uhid', 'disabled'].includes(mode)))
+          throw new Error('镜像输入模式无效，请在桌面模式设置中重新选择')
+        const screenOff = owner.win.fusionRole ? store.get('fusionMode.fusionScreenOff') : settings.desktopScreenOff
+        if (screenOff)
+          ensureScreenSession(owner, deviceId)
+        // The mode's dedicated screen controller restores power on final exit.
+        // A temporary mirror must not run its own power restoration when closed.
+        const mirrorServer = await desktopServer(getScrcpy())
+        await ensureClipboardRelay(owner, deviceId, mirrorServer)
+        if (owner.closed)
+          throw new Error('桌面窗口已关闭')
+        const videoSettings = { ...store.get(['scrcpy', 'global']), ...store.get(['scrcpy', deviceId]) }
+        const mirrorSize = Math.max(640, Math.min(3840, Number(videoSettings['--max-size']) || 1920))
+        const child = spawn(getScrcpy(), [`--serial=${deviceId}`, '--display-id=0', '--force-adb-forward', '--window-title=手机镜像', '--no-audio', `--max-size=${mirrorSize}`, '--max-fps=60', `--keyboard=${keyboardMode}`, `--mouse=${mouseMode}`, ...(screenOff ? ['--no-power-on', '--no-cleanup', '--turn-screen-off'] : [])], { windowsHide: true, env: { ...process.env, ADB: getAdb(), SCRCPY_ICON_DIR: extraResolve('common/phone-mirror'), SCRCPY_SERVER_PATH: mirrorServer, ...(process.platform === 'win32' && keyboardMode === 'uhid' ? { SDL_WINDOWS_RAW_KEYBOARD: '1' } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] })
+        owner.phoneMirror = child
+        const ready = new Promise((resolve, reject) => {
+          let timer
+          let settled = false
+          let log = ''
+          const finish = (error) => {
+            if (settled)
+              return
+            settled = true
+            clearTimeout(timer)
+            if (error)
+              sessionLog({ event: 'phone-mirror-start-error', error: error.message })
+            error ? reject(error) : resolve()
+          }
+          timer = setTimeout(() => {
+            child.kill()
+            finish(new Error('手机镜像启动超时'))
+          }, 18000)
+          const collect = (data) => {
+            log = (log + data).slice(-2500)
+            if (/Renderer:|Texture:|Texture size:/.test(log))
+              finish()
+          }
+          child.stdout.on('data', collect)
+          child.stderr.on('data', collect)
+          child.once('error', finish)
+          child.once('exit', () => {
+            if (owner.phoneMirror === child)
+              owner.phoneMirror = null
+            finish(new Error(log || '手机镜像已关闭'))
+          })
+        })
+        try {
+          await ready
         }
-        timer = setTimeout(() => {
-          child.kill()
-          finish(new Error('手机镜像启动超时'))
-        }, 18000)
-        const collect = (data) => {
-          log = (log + data).slice(-2500)
-          if (/Renderer:|Texture:/.test(log))
-            finish()
-        }
-        child.stdout.on('data', collect)
-        child.stderr.on('data', collect)
-        child.once('error', finish)
-        child.once('exit', () => {
+        catch (error) {
           if (owner.phoneMirror === child)
             owner.phoneMirror = null
-          finish(new Error(log || '手机镜像已关闭'))
+          child.kill()
+          throw error
+        }
+        const mirrorId = '__phone_mirror__'
+        const mirrorSession = { child, deviceId, displayId: 0, packageName: '', mirror: true, keyboardMode, mouseMode, refreshIme: true }
+        owner.sessions.set(mirrorId, mirrorSession)
+        child.once('exit', () => {
+          if (owner.sessions.get(mirrorId) === mirrorSession)
+            owner.sessions.delete(mirrorId)
+          owner.bridge.request('forget', { appId: mirrorId }).catch(() => {})
+          if (!owner.sessions.size) {
+            owner.audio?.kill()
+            owner.audio = null
+          }
         })
-      })
-      if (app.bossHidden)
-        await owner.bridge.request('mirror-visibility', { pid: child.pid, title: '手机镜像', hidden: true })
-      ensureAudio(owner, deviceId)
-      return true
+        try {
+          let registered = false
+          for (let attempt = 0; attempt < 40 && child.exitCode === null && !owner.closed; attempt++) {
+            registered = await owner.bridge.request('register-external', { appId: mirrorId, pid: child.pid, title: '手机镜像', keyboard: keyboardMode })
+            if (registered)
+              break
+            await delay(100)
+          }
+          if (!registered)
+            throw new Error('手机镜像输入窗口注册失败，请重试')
+        }
+        catch (error) {
+          closeSession(owner, mirrorId)
+          throw error
+        }
+        if (process.platform === 'win32') {
+          child.once('exit', () => owner.bridge.request('mirror-icon-release', { pid: child.pid }).catch(() => {}))
+          await owner.bridge.request('mirror-icon', { pid: child.pid, title: '手机镜像', icon: extraResolve('common/phone-mirror/phone-mirror.ico') }).catch(error => sessionLog({ event: 'mirror-icon-error', error: error.message }))
+        }
+        if (owner.win.fusionRole) {
+          let minimized = false
+          let coveredSince = 0
+          let checking = false
+          let transitioning = false
+          let floating
+          const transition = async (opening) => {
+            if (process.platform !== 'win32')
+              return false
+            const point = screen.dipToScreenPoint({ x: floating.position.x + 40, y: floating.position.y + 40 })
+            transitioning = true
+            try {
+              return await owner.bridge.request('mirror-transition', { pid: child.pid, title: '手机镜像', opening, ...point })
+            }
+            finally { transitioning = false }
+          }
+          floating = registerFloatingTarget({ deviceId, nativeFocus: true, name: '手机镜像', icon: nativeImage.createFromPath(extraResolve('common/phone-mirror/scrcpy.png')).toDataURL(), isMinimized: () => minimized, restore: async () => {
+            if (transitioning)
+              return
+            await transition(true)
+            const focused = await owner.bridge.request('mirror-focus', { pid: child.pid, title: '手机镜像' })
+            if (!focused)
+              throw new Error('镜像窗口不可用')
+            minimized = false
+          } })
+          await owner.bridge.request('mirror-floating', { pid: child.pid, title: '手机镜像' })
+          const timer = setInterval(async () => {
+            if (checking || transitioning || app.bossHidden || owner.closed)
+              return
+            checking = true
+            try {
+              const state = await owner.bridge.request('mirror-floating', { pid: child.pid, title: '手机镜像' })
+              if (state === 'minimized') {
+                if (!minimized)
+                  await transition(false)
+                minimized = true
+              }
+              if (state === 'visible') {
+                minimized = false
+                const covered = process.platform === 'win32' && await owner.bridge.request('mirror-covered', { pid: child.pid, title: '手机镜像' })
+                coveredSince = covered ? coveredSince || Date.now() : 0
+                if (coveredSince && Date.now() - coveredSince > 900) {
+                  await transition(false)
+                  minimized = true
+                  coveredSince = 0
+                }
+              }
+              else {
+                coveredSince = 0
+              }
+              await floating.update()
+            }
+            catch (error) { sessionLog({ event: 'mirror-floating-error', error: error.message }) }
+            finally { checking = false }
+          }, 350)
+          child.once('exit', () => {
+            clearInterval(timer)
+            floating.dispose()
+          })
+        }
+        if (app.bossHidden)
+          await owner.bridge.request('mirror-visibility', { pid: child.pid, title: '手机镜像', hidden: true })
+        ensureAudio(owner, deviceId)
+        return true
+      })()
+      owner.mirrorOpening = opening
+      try {
+        return await opening
+      }
+      finally {
+        if (owner.mirrorOpening === opening)
+          owner.mirrorOpening = null
+      }
     })
     ipcMain.handle('desktop-fusion-launcher', async (event, expanded) => {
       const owner = ownerFor(event)
       const win = owner.win
       if (win.fusionRole !== 'launcher')
-        throw new Error('不是融合模式应用栏')
+        throw new Error('不是桌面模式应用栏')
       if (app.bossHidden) {
         win.setSkipTaskbar(true)
         win.hide()
@@ -1329,21 +1899,15 @@ export default {
       }
       const generation = owner.launcherGeneration = (owner.launcherGeneration || 0) + 1
       if (!expanded) {
-        if (!win.isMinimized())
-          win.minimize()
-        await delay(100)
-        if (!win.isDestroyed())
-          await owner.bridge.request('popup-taskbar')
+        win.hide()
         return true
       }
-      if (!owner.taskbarReady) {
-        await owner.bridge.request('popup-taskbar')
-        owner.taskbarReady = true
-      }
+      await owner.bridge.request('popup-tray')
       let anchor
       {
-        const raw = await owner.bridge.request('fusion-anchor').catch(() => null)
-        const iconPoint = raw ? screen.screenToDipPoint({ x: Math.round(raw.x + raw.width / 2), y: Math.round(raw.y) }) : null
+        const raw = null
+        const trayBounds = win.fusionTrayBounds
+        const iconPoint = trayBounds ? { x: trayBounds.x + trayBounds.width / 2, y: trayBounds.y } : raw ? screen.screenToDipPoint({ x: Math.round(raw.x + raw.width / 2), y: Math.round(raw.y) }) : null
         const display = iconPoint ? screen.getDisplayNearestPoint(iconPoint) : screen.getPrimaryDisplay()
         const area = display.workArea
         const point = iconPoint || { x: area.x + Math.round(area.width / 2), y: area.y + area.height }
@@ -1358,9 +1922,7 @@ export default {
         win.restore()
       win.show()
       win.focus()
-      const result = await owner.bridge.request('popup-taskbar')
-      win.emit('glass-refresh')
-      return result
+      return true
     })
     ipcMain.handle('desktop-fusion-app-layout', (event, ratio) => {
       const win = desktopWindow(event)
@@ -1387,7 +1949,7 @@ export default {
       win.fusionRatioExtra = extra
       win.fusionRatio = ratio
       win.fusionLayoutReady = true
-      if (!hostIsFullscreen(win) && !win.fusionShapeSuspended && store.get('desktopMode.desktopResizeMode') !== 'adaptive')
+      if (!hostIsFullscreen(win) && !win.fusionShapeSuspended && (store.get('fusionMode.desktopResizeMode') || store.get('desktopMode.desktopResizeMode')) !== 'adaptive')
         win.setAspectRatio(ratio, extra)
       return true
     })
@@ -1418,7 +1980,7 @@ export default {
           }
           let width = Math.max(240, bounds.width + (edge.includes('w') ? -dx : edge.includes('e') ? dx : 0))
           let height = Math.max(320, bounds.height + (edge.includes('n') ? -dy : edge.includes('s') ? dy : 0))
-          if (store.get('desktopMode.desktopResizeMode') !== 'adaptive') {
+          if ((store.get('fusionMode.desktopResizeMode') || store.get('desktopMode.desktopResizeMode')) !== 'adaptive') {
             const ratio = win.fusionRatio || bounds.width / bounds.height
             if (edge === 'n' || edge === 's')
               width = Math.max(240, Math.round(height * ratio))
@@ -1430,6 +1992,13 @@ export default {
       if (action === 'drag-end') {
         clearInterval(win.fusionGestureTimer)
         win.fusionDrag = null
+      }
+      if (action === 'maximize') {
+        if (hostIsFullscreen(win))
+          await changeHostFullscreen(win, false)
+        if (win.isMaximized())
+          win.unmaximize()
+        else win.maximize()
       }
       if (action === 'state')
         return hostIsFullscreen(win)
@@ -1443,7 +2012,9 @@ export default {
       if (action === 'minimize') {
         if (hostIsFullscreen(win))
           await changeHostFullscreen(win, false)
-        win.minimize()
+        if (win.fusionMinimize)
+          await win.fusionMinimize()
+        else win.minimize()
       }
       return true
     })
@@ -1497,7 +2068,10 @@ export default {
       const owner = ownerFor(event)
       if (owner.hostInput || !owner.sessions.has(id) || id === '__desktop_wallpaper__')
         return false
-      return owner.bridge.request('focus', { appId: id })
+      const focused = await owner.bridge.request('focus', { appId: id })
+      if (!focused || owner.hostInput)
+        return false
+      return confirmAppInputFocus(owner, id)
     })
     ipcMain.handle('desktop-phone-command', (event, { deviceId, command }) => {
       desktopWindow(event)
@@ -1536,13 +2110,35 @@ export default {
       desktopWindow(event)
       return (await agent(serial(deviceId), 'apps')).apps
     })
+    ipcMain.handle('desktop-application-info', async (event, { deviceId, packageName }) => {
+      desktopWindow(event)
+      deviceId = serial(deviceId)
+      if (!/^[\w.]+$/.test(packageName))
+        throw new Error('应用包名无效')
+      const key = `${deviceId}:${packageName}`
+      if (!notificationApps.has(key)) {
+        const result = await agent(deviceId, `notification-apps ${packageName}`)
+        notificationApps.set(key, result.apps?.[packageName] || {})
+      }
+      return { packageName, ...notificationApps.get(key) }
+    })
     ipcMain.handle('desktop-device-battery', async (event, deviceId) => {
       desktopWindow(event)
-      const output = await adb(serial(deviceId), ['shell', 'dumpsys battery'], {
-        timeout: 4000,
+      deviceId = serial(deviceId)
+      const previous = batteryReadings.get(deviceId)
+      if (previous && Date.now() - previous.time < 10000)
+        return previous.pending
+      const pending = (async () => {
+        const output = await adb(deviceId, ['shell', 'dumpsys battery'], { timeout: 4000 })
+        const level = output.match(/^\s*level:\s*(\d+)/m)
+        return level ? { level: Math.max(0, Math.min(100, Number(level[1]))), charging: /^\s*status:\s*(?:2|5)\s*$/m.test(output) && /^\s*(?:AC|USB|Wireless|Dock) powered:\s*true\s*$/im.test(output) } : null
+      })()
+      batteryReadings.set(deviceId, { time: Date.now(), pending })
+      pending.catch(() => {
+        if (batteryReadings.get(deviceId)?.pending === pending)
+          batteryReadings.delete(deviceId)
       })
-      const level = output.match(/^\s*level:\s*(\d+)/m)
-      return level ? { level: Math.max(0, Math.min(100, Number(level[1]))), charging: /^\s*status:\s*(?:2|5)\s*$/m.test(output) && /^\s*(?:AC|USB|Wireless|Dock) powered:\s*true\s*$/im.test(output) } : null
+      return pending
     })
     ipcMain.handle('desktop-notification-action', (event, request) => {
       const owner = ownerFor(event)
@@ -1587,9 +2183,9 @@ export default {
         )
       },
     )
-    ipcMain.handle('desktop-notifications', async (event, deviceId) => {
+    ipcMain.handle('desktop-notifications', async (event, deviceId, options) => {
       desktopWindow(event)
-      return readPhoneNotifications(serial(deviceId))
+      return readPhoneNotifications(serial(deviceId), options?.details !== false)
     })
     ipcMain.handle('desktop-device-state', async (event, deviceId) => {
       desktopWindow(event)
@@ -1774,8 +2370,10 @@ export default {
         )
         throw new Error(`手机不支持在线调整此虚拟显示器：${error.message}`)
       }
-      session.config = next
-      return next
+      session.config = { ...previous, ...next, layout: config.layout || previous.layout }
+      session.refreshIme = true
+      deviceInputFocus.delete(session.deviceId)
+      return session.config
     })
     ipcMain.on('desktop-app-layout', (event, layout) => {
       try {
@@ -1790,11 +2388,15 @@ export default {
       }
     })
     app.once('before-quit', () => {
+      clearTimeout(clipboardWriteTimer)
+      clipboardWriteTimer = null
+      pendingPhoneClipboard = null
       for (const owner of owners.values()) {
         stopScreenSession(owner)
 
         stopTaskStream(owner)
         owner.closed = true
+        releaseClipboardRelay(owner)
         owner.phoneMirror?.kill()
         stopWallpaper(owner)
         clearInterval(owner.focusTimer)

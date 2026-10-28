@@ -136,6 +136,7 @@ function getGlassBridge() {
   ready.catch(() => {})
   const reader = createInterface({ input: child.stdout })
   let errors = ''
+  let stopped = false
   child.stderr.on('data', data => errors = (errors + data).slice(-2000))
   reader.on('line', (line) => {
     let message
@@ -156,6 +157,9 @@ function getGlassBridge() {
     message.error ? request.reject(new Error(message.error)) : request.resolve(message.result)
   })
   const ended = (error) => {
+    if (stopped)
+      return
+    stopped = true
     clearTimeout(timeout)
     const failure = error || new Error(errors || '原生圆角服务已关闭')
     rejectReady(failure)
@@ -169,12 +173,15 @@ function getGlassBridge() {
   }
   child.once('error', ended)
   child.once('exit', () => ended())
+  child.stdin.on('error', ended)
+  child.stdout.on('error', ended)
+  child.stderr.on('error', ended)
   glassBridge = {
     child,
     windows: new Set(),
     async request(data) {
       await ready
-      if (child.killed || child.exitCode !== null)
+      if (stopped || child.killed || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded)
         throw new Error('原生圆角服务已关闭')
       const id = ++sequence
       return new Promise((resolve, reject) => {
@@ -183,7 +190,10 @@ function getGlassBridge() {
           reject(new Error('原生圆角更新超时'))
         }, 5000)
         pending.set(id, { resolve, reject, timer })
-        child.stdin.write(`${JSON.stringify({ ...data, id })}\n`)
+        child.stdin.write(`${JSON.stringify({ ...data, id })}\n`, (error) => {
+          if (error)
+            ended(error)
+        })
       })
     },
   }
@@ -226,7 +236,7 @@ export async function attachRoundedGlass(win, preferences) {
     finally { syncing = false }
   }
   for (const event of ['resize', 'move', 'show', 'restore', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen', 'fusion-refresh-shape', 'glass-refresh'])
-    win.on(event, () => sync(['show', 'restore', 'glass-refresh'].includes(event)))
+    win.on(event, () => sync(event === 'glass-refresh'))
   const appearanceChanged = () => sync(true)
   const stopOpacity = preferences?.onDidChange('common.glassOpacity', appearanceChanged)
   nativeTheme.on('updated', appearanceChanged)

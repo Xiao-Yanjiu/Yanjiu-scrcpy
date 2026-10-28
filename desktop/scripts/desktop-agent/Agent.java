@@ -23,12 +23,16 @@ import java.util.List;
 
 /** Runs as the ADB shell user; no APK, account or background service is installed. */
 public final class Agent {
-    private static Context context() throws Exception {
+    private static Context cachedContext;
+    private static final java.util.Map<String,Boolean> floatingActivities = new java.util.HashMap<String,Boolean>();
+    private static synchronized Context context() throws Exception {
+        if (cachedContext != null) return cachedContext;
         android.os.Looper.prepareMainLooper();
         Class<?> cls = Class.forName("android.app.ActivityThread");
         Object thread = cls.getMethod("systemMain").invoke(null);
         Context system = (Context) cls.getMethod("getSystemContext").invoke(thread);
-        return system.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
+        cachedContext = system.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
+        return cachedContext;
     }
 
     private static String image(Drawable drawable, int width, int height, boolean jpeg) throws Exception {
@@ -240,30 +244,82 @@ public final class Agent {
             JSONObject item = new JSONObject().put("taskId", type.getField("taskId").getInt(task)).put("displayId", type.getField("displayId").getInt(task)).put("packageName", top.getPackageName()).put("component", top.flattenToShortString());
             android.content.ComponentName base = (android.content.ComponentName) type.getField("baseActivity").get(task);
             if (base != null) item.put("basePackage", base.getPackageName());
-            // Dialog Activities (for example Wi-Fi pickers) must remain in the
-            // physical control-center stream instead of becoming desktop apps.
-            try {
-                Context system = (Context) Class.forName("android.app.ActivityThread").getMethod("currentApplication").invoke(null);
-                if (system == null) {
-                    Object thread = Class.forName("android.app.ActivityThread").getMethod("currentActivityThread").invoke(null);
-                    system = (Context) thread.getClass().getMethod("getSystemContext").invoke(thread);
-                }
-                android.content.pm.ActivityInfo info = system.getPackageManager().getActivityInfo(top, 0);
-                Context activity = system.createPackageContext(top.getPackageName(), Context.CONTEXT_IGNORE_SECURITY);
-                android.content.res.Resources.Theme theme = activity.getResources().newTheme();
-                theme.applyStyle(info.getThemeResource(), true);
-                android.content.res.TypedArray values = theme.obtainStyledAttributes(new int[]{android.R.attr.windowIsFloating});
-                item.put("floating", values.getBoolean(0, false)); values.recycle();
-            } catch (Throwable ignored) {}
+            String component = top.flattenToString();
+            Boolean floating = floatingActivities.get(component);
+            if (floating == null) {
+                floating = false;
+                try {
+                    Context system = context();
+                    android.content.pm.ActivityInfo info = system.getPackageManager().getActivityInfo(top, 0);
+                    Context activity = system.createPackageContext(top.getPackageName(), Context.CONTEXT_IGNORE_SECURITY);
+                    android.content.res.Resources.Theme theme = activity.getResources().newTheme();
+                    theme.applyStyle(info.getThemeResource(), true);
+                    android.content.res.TypedArray values = theme.obtainStyledAttributes(new int[]{android.R.attr.windowIsFloating});
+                    floating = values.getBoolean(0, false); values.recycle();
+                } catch (Throwable ignored) {}
+                if (floatingActivities.size() >= 512) floatingActivities.clear();
+                floatingActivities.put(component, floating);
+            }
+            item.put("floating", floating);
             try { item.put("visible", type.getField("visible").getBoolean(task)); } catch (Throwable ignored) { try { item.put("visible", type.getField("isVisible").getBoolean(task)); } catch (Throwable old) { item.put("visible", true); } }
             try { item.put("focused", type.getField("isFocused").getBoolean(task)); } catch (Throwable ignored) {}
             result.put(item);
         }
         return new JSONObject().put("tasks", result);
     }
+    private static JSONObject focusDisplay(JSONObject request) throws Exception {
+        int displayId = request.getInt("displayId");
+        String pkg = request.getString("packageName");
+        if (displayId < 0 || (displayId != 0 && !pkg.matches("[a-zA-Z0-9_.]+"))) throw new Exception("Invalid application display");
+        Object service = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
+        Class<?> manager = Class.forName("android.app.IActivityTaskManager");
+        List<?> tasks = (List<?>) manager.getMethod("getAllRootTaskInfos").invoke(service);
+        int taskId = -1;
+        for (Object task : tasks) {
+            Class<?> type = task.getClass();
+            android.content.ComponentName top = (android.content.ComponentName) type.getField("topActivity").get(task);
+            if (type.getField("displayId").getInt(task) == displayId && top != null && (displayId == 0 || pkg.equals(top.getPackageName()))) {
+                taskId = type.getField("taskId").getInt(task); break;
+            }
+        }
+        if (taskId < 0) throw new Exception("应用任务不在指定虚拟显示器中，未修改其他应用的焦点");
+        JSONObject result = new JSONObject();
+        if (displayId > 0 && request.optBoolean("restoreIme")) {
+            try {
+                Object wm = Class.forName("android.view.WindowManagerGlobal").getMethod("getWindowManagerService").invoke(null);
+                Class.forName("android.view.IWindowManager").getMethod("setDisplayImePolicy", int.class, int.class).invoke(wm, displayId, 0);
+            } catch (NoSuchMethodException ignored) {
+                // The scrcpy display was already created with --display-ime-policy=local.
+            } catch (Throwable warning) { result.put("imeWarning", warning.toString()); }
+        }
+        try { manager.getMethod("focusTopTask", int.class).invoke(service, displayId); }
+        catch (NoSuchMethodException legacy) { manager.getMethod("setFocusedTask", int.class).invoke(service, taskId); }
+        return result.put("displayId", displayId).put("focused", true);
+    }
     private static void streamTasks() throws Exception {
         final java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean(true);
-        Thread input = new Thread(() -> { try { while(System.in.read()!=-1) {} } catch(Exception ignored) {} running.set(false); });
+        Thread input = new Thread(() -> {
+            try {
+                java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(System.in, "UTF-8"));
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    JSONObject reply = new JSONObject();
+                    try {
+                        JSONObject request = new JSONObject(line);
+                        reply.put("id", request.getInt("id"));
+                        if (!"focus-display".equals(request.optString("command"))) throw new Exception("Unknown task-channel command");
+                        JSONObject focused = focusDisplay(request);
+                        java.util.Iterator<String> keys = focused.keys();
+                        while (keys.hasNext()) { String key = keys.next(); reply.put(key, focused.get(key)); }
+                    } catch (Throwable error) {
+                        while (error.getCause() != null) error = error.getCause();
+                        try { reply.put("error", error.toString()); } catch (Exception ignored) {}
+                    }
+                    System.out.println("DESKTOP_INPUT:" + reply.toString()); System.out.flush();
+                }
+            } catch (Exception ignored) {}
+            running.set(false);
+        });
         input.setDaemon(true); input.start();
         String previous = "";
         while(running.get()) {

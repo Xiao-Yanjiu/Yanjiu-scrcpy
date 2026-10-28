@@ -16,6 +16,10 @@ function toggleBossWindows() {
       if (win.isDestroyed())
         continue
       win.setSkipTaskbar(Boolean(win.keepTaskbarHidden))
+      if (win.fusionRole === 'app' && (state.minimized || state.fusionMinimized || !state.visible)) {
+        win.hide()
+        continue
+      }
       if (state.minimized) {
         win.showInactive()
         win.minimize()
@@ -28,7 +32,7 @@ function toggleBossWindows() {
     return
   }
   app.bossHidden = true
-  hiddenWindows = BrowserWindow.getAllWindows().map(win => ({ win, visible: win.isVisible(), minimized: win.isMinimized() }))
+  hiddenWindows = BrowserWindow.getAllWindows().map(win => ({ win, visible: win.isVisible(), minimized: win.isMinimized(), fusionMinimized: win.fusionMinimized }))
   for (const { win } of hiddenWindows) {
     win.setSkipTaskbar(true)
     win.hide()

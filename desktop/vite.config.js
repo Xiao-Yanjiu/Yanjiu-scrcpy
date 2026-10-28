@@ -1,6 +1,6 @@
 import { defineConfig, mergeConfig } from 'vite'
 
-import { rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import useVueRouter from 'vue-router/vite'
@@ -16,14 +16,17 @@ import useInternalPlugins from './src/plugins/internal.js'
 import postcssConfig from './postcss.config.js'
 
 const alias = {
-  $: resolve('src'),
-  $root: resolve(),
-  $docs: resolve('docs'),
-  $renderer: resolve('src'),
-  $electron: resolve('electron'),
-  $control: resolve('pages/control'),
-  $explorer: resolve('pages/explorer'),
-  $terminal: resolve('pages/terminal'),
+  // Direct source startup must not consume stale workspace dist files.
+  '@yanjiu-scrcpy/electron-setup/main': resolve('../packages/electron-setup/main/index.ts'),
+  '@yanjiu-scrcpy/electron-setup/plugins': resolve('../packages/electron-setup/plugins/index.ts'),
+  '$': resolve('src'),
+  '$root': resolve(),
+  '$docs': resolve('docs'),
+  '$renderer': resolve('src'),
+  '$electron': resolve('electron'),
+  '$control': resolve('pages/control'),
+  '$explorer': resolve('pages/explorer'),
+  '$terminal': resolve('pages/terminal'),
 }
 
 function mergeCommon(config) {
@@ -122,8 +125,18 @@ export default defineConfig((args) => {
             vite: mergeCommon({
               plugins: [notBundle()],
             }, args),
-            onstart(args) {
-              args.startup()
+            async onstart(args) {
+              await args.startup()
+              // Capture native/fatal exits from the parent, even when Electron
+              // cannot flush its own log. The plugin exits Node immediately.
+              process.electronApp?.prependOnceListener('exit', (code, signal) => {
+                try {
+                  const directory = resolve('..', 'user-data', 'logs')
+                  mkdirSync(directory, { recursive: true })
+                  appendFileSync(resolve(directory, 'electron-exit.log'), `${JSON.stringify({ time: new Date().toISOString(), code, hex: code == null ? null : `0x${(code >>> 0).toString(16)}`, signal })}\n`)
+                }
+                catch {}
+              })
             },
           },
           preload: {

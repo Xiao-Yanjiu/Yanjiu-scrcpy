@@ -10,7 +10,48 @@ using System.Collections.Generic;
 using System.Threading;
 [ComImport,Guid("29E691FA-4567-4DCA-B319-D0F207EB6807"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface ICompositorDesktopInterop { void CreateDesktopWindowTarget(IntPtr hwnd,[MarshalAs(UnmanagedType.Bool)]bool topmost,[MarshalAs(UnmanagedType.IInspectable)]out object target);void EnsureOnThread(uint id); }
+[ComImport,Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMirrorPropertyStore {
+  void GetCount(out uint count);void GetAt(uint index,out MirrorPropertyKey key);
+  void GetValue(ref MirrorPropertyKey key,out MirrorPropVariant value);
+  void SetValue(ref MirrorPropertyKey key,ref MirrorPropVariant value);void Commit();
+}
+[StructLayout(LayoutKind.Sequential)] struct MirrorPropertyKey {public Guid format;public uint id;}
+[StructLayout(LayoutKind.Explicit,Size=24)] struct MirrorPropVariant {
+  [FieldOffset(0)] public ushort type;[FieldOffset(8)] public IntPtr text;
+}
 public static class DesktopWindowBridge {
+  [DllImport("shell32.dll")] static extern int SHGetPropertyStoreForWindow(IntPtr hwnd,ref Guid iid,out IMirrorPropertyStore store);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern IntPtr LoadImage(IntPtr instance,string name,uint type,int width,int height,uint flags);
+  [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr icon);
+  static readonly Dictionary<int,List<IntPtr>> mirrorIcons=new Dictionary<int,List<IntPtr>>();
+  public static void ForgetMirrorIcons(int process) {
+    List<IntPtr> icons;if(!mirrorIcons.TryGetValue(process,out icons))return;
+    mirrorIcons.Remove(process);foreach(IntPtr icon in icons)DestroyIcon(icon);
+  }
+  public static bool MirrorIcon(int process,string title,string file) {
+    IntPtr hwnd=Find(process,title);if(hwnd==IntPtr.Zero)return false;
+    foreach(int size in new int[]{16,32}) {
+      IntPtr icon=LoadImage(IntPtr.Zero,file,1,size,size,0x10);
+      if(icon==IntPtr.Zero)throw new InvalidOperationException("Mirror icon could not be loaded");
+      UIntPtr result;
+      if(SendMessageTimeout(hwnd,0x80,new UIntPtr(size==16?0u:1u),icon,2,250,out result)==IntPtr.Zero){DestroyIcon(icon);throw new InvalidOperationException("Mirror icon update timed out");}
+      if(!mirrorIcons.ContainsKey(process))mirrorIcons[process]=new List<IntPtr>();
+      mirrorIcons[process].Add(icon);
+    }
+    Guid iid=new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");IMirrorPropertyStore store;
+    Marshal.ThrowExceptionForHR(SHGetPropertyStoreForWindow(hwnd,ref iid,out store));
+    try {
+      foreach(var item in new Dictionary<uint,string>{{5,"YanjiuScrcpy.PhoneMirror"},{3,file},{4,"手机镜像"}}) {
+        MirrorPropertyKey key=new MirrorPropertyKey {format=new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"),id=item.Key};
+        MirrorPropVariant value=new MirrorPropVariant {type=31,text=Marshal.StringToCoTaskMemUni(item.Value)};
+        try{store.SetValue(ref key,ref value);}finally{Marshal.FreeCoTaskMem(value.text);}
+      }
+      store.Commit();
+    }finally{Marshal.ReleaseComObject(store);}
+    return true;
+  }
+
   [StructLayout(LayoutKind.Sequential)] struct AccentPolicy { public int state,flags,color,animation; }
   [StructLayout(LayoutKind.Sequential)] struct CompositionData { public int attribute; public IntPtr data; public int size; }
   [StructLayout(LayoutKind.Sequential)] struct BlurRegion { public uint flags; [MarshalAs(UnmanagedType.Bool)] public bool enable; public IntPtr region; [MarshalAs(UnmanagedType.Bool)] public bool transition; }
@@ -66,7 +107,7 @@ public static class DesktopWindowBridge {
     lock(switcherGate) { fusionLauncher=hwnd; FusionStyle(switcherHidden); }
     if(keyboardHook==IntPtr.Zero) {
       PostThreadMessage(mouseThreadId,0x8002,UIntPtr.Zero,IntPtr.Zero);
-      if(!keyboardReady.WaitOne(2000) || keyboardHook==IntPtr.Zero) throw new InvalidOperationException("无法初始化融合模式 Alt+Tab 过滤");
+      if(!keyboardReady.WaitOne(2000) || keyboardHook==IntPtr.Zero) throw new InvalidOperationException("无法初始化桌面模式 Alt+Tab 过滤");
     }
     return GetWindowLong(hwnd,-20);
   }
@@ -143,6 +184,7 @@ public static class DesktopWindowBridge {
   static IntPtr mouseHook;
   static MouseProc mouseCallback=OnMouse;
   static bool blockedRightUp;
+  static volatile bool hostEditing;
   public static bool StartMouse() {
     ManualResetEvent started=new ManualResetEvent(false);
     mouseThread=new Thread(() => {
@@ -164,8 +206,8 @@ public static class DesktopWindowBridge {
     lock(switcherGate) { switcherHidden=false;FusionStyle(false);if(switcherTimer!=null) {switcherTimer.Dispose();switcherTimer=null;} }
     if(mouseThreadId!=0) PostThreadMessage(mouseThreadId,0x12,UIntPtr.Zero,IntPtr.Zero);
   }
-  public static void Register(string id,IntPtr hwnd) { lock(gate) { appWindows[id]=hwnd; } }
-  public static void Forget(string id) { lock(gate) { appWindows.Remove(id); returnModes.Remove(id); } }
+  public static void Register(string id,IntPtr hwnd) { lock(gate) { appWindows[id]=hwnd; } if(id!="__desktop_wallpaper__" && id!="__phone_mirror__" && hostEditing) EnableWindow(hwnd,false); }
+  public static void Forget(string id) { lock(gate) { IntPtr hwnd;if(appWindows.TryGetValue(id,out hwnd)) rawKeyboardWindows.Remove(hwnd);appWindows.Remove(id); returnModes.Remove(id); } }
   public static void SetRightBack(string id,bool enabled) { lock(gate) { if(enabled) returnModes.Add(id); else returnModes.Remove(id); } }
   static IntPtr RegisteredAncestor(IntPtr hwnd) {
     for(int depth=0;hwnd!=IntPtr.Zero && depth<24;depth++,hwnd=GetParent(hwnd)) {
@@ -181,25 +223,40 @@ public static class DesktopWindowBridge {
     }
     return null;
   }
+  // Never perform cross-thread focus, IME calls or pipe writes in a global hook.
+  static readonly System.Collections.Concurrent.ConcurrentQueue<Action> mouseWork=new System.Collections.Concurrent.ConcurrentQueue<Action>();
+  static int mouseWorker;
+  static void QueueMouseWork(Action action) {
+    if(mouseWork.Count>=64)return;
+    mouseWork.Enqueue(action);
+    if(Interlocked.CompareExchange(ref mouseWorker,1,0)!=0)return;
+    ThreadPool.QueueUserWorkItem(_=>{
+      do {
+        Action work;
+        while(mouseWork.TryDequeue(out work)) {try{work();}catch{}}
+        Interlocked.Exchange(ref mouseWorker,0);
+      } while(!mouseWork.IsEmpty && Interlocked.CompareExchange(ref mouseWorker,1,0)==0);
+    });
+  }
   static IntPtr OnMouse(int code,IntPtr message,IntPtr data) {
     if(code>=0) {
       int kind=message.ToInt32();
       if(kind==0x205 && blockedRightUp) { blockedRightUp=false; return new IntPtr(1); }
       if(kind==0x201 || kind==0x204) {
         MouseData mouse=(MouseData)Marshal.PtrToStructure(data,typeof(MouseData));
-        IntPtr pointed=RegisteredAncestor(WindowFromPoint(mouse.point));
+        IntPtr pointed=hostEditing ? IntPtr.Zero : RegisteredAncestor(WindowFromPoint(mouse.point));
         if(pointed!=IntPtr.Zero) {
-          lock(gate) { foreach(var app in appWindows) { if(app.Value==pointed) { Console.WriteLine("{\"event\":\"pointer-down\",\"appId\":\""+app.Key+"\"}"); break; } } }
+          lock(gate) { foreach(var app in appWindows) { if(app.Value==pointed) { string appId=app.Key;QueueMouseWork(()=>Console.WriteLine("{\"event\":\"pointer-down\",\"appId\":\""+appId+"\"}")); break; } } }
         }
         IntPtr focus=Focused();
         if(pointed!=IntPtr.Zero && GetAncestor(GetForegroundWindow(),2)==GetAncestor(pointed,2)) {
-          FocusApp(pointed);
+          IntPtr target=pointed;QueueMouseWork(()=>{if(GetAncestor(GetForegroundWindow(),2)==GetAncestor(target,2))FocusApp(target);});
           focus=pointed;
         }
         string id=kind==0x204 ? RouteRightClick(pointed,focus) : null;
         if(id!=null) {
           blockedRightUp=true;
-          Console.WriteLine("{\"event\":\"right-back\",\"appId\":\""+id+"\"}");
+          QueueMouseWork(()=>Console.WriteLine("{\"event\":\"right-back\",\"appId\":\""+id+"\"}"));
           return new IntPtr(1);
         }
       }
@@ -226,7 +283,93 @@ public static class DesktopWindowBridge {
     }
     return true;
   }
-  public static bool FocusExternal(int process,string title) { IntPtr hwnd=Find(process,title);if(hwnd==IntPtr.Zero)return false;ShowWindow(hwnd,9);return SetForegroundWindow(hwnd); }
+  [DllImport("user32.dll",EntryPoint="SetWindowLongPtrW")] static extern IntPtr SetWindowLongPtr(IntPtr hwnd,int index,IntPtr value);
+  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd,uint command);
+  static readonly Dictionary<IntPtr,Rect> mirrorBounds=new Dictionary<IntPtr,Rect>();
+  [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr hwnd,uint color,byte alpha,uint flags);
+  public static bool MirrorTransition(int process,string title,bool opening,int x,int y) {
+    IntPtr hwnd=Find(process,title);Rect bounds;
+    if(hwnd==IntPtr.Zero || !mirrorBounds.TryGetValue(hwnd,out bounds)) return false;
+    int style=GetWindowLong(hwnd,-20);SetWindowLong(hwnd,-20,style|0x80000);
+    int width=bounds.right-bounds.x,height=bounds.bottom-bounds.y;
+    int endX=x-width/2,endY=y-height/2;
+    try {
+      SetLayeredWindowAttributes(hwnd,0,0,2);
+      if(IsIconic(hwnd))ShowWindow(hwnd,9);
+      SetWindowPos(hwnd,IntPtr.Zero,opening?endX:bounds.x,opening?endY:bounds.y,width,height,0x14);
+      ShowWindow(hwnd,4);
+      if(opening)FocusExternal(process,title);
+      var watch=System.Diagnostics.Stopwatch.StartNew();
+      while(IsWindow(hwnd)) {
+        double t=Math.Min(1,watch.Elapsed.TotalMilliseconds/240.0);
+        double eased=1-Math.Pow(1-t,3),distance=opening?1-eased:eased;
+        SetWindowPos(hwnd,IntPtr.Zero,(int)Math.Round(bounds.x+(endX-bounds.x)*distance),(int)Math.Round(bounds.y+(endY-bounds.y)*distance),width,height,0x14);
+        SetLayeredWindowAttributes(hwnd,0,(byte)Math.Round(255*(opening?eased:1-eased)),2);
+        if(t>=1)break;Thread.Sleep(16);
+      }
+    } finally {
+      if(IsWindow(hwnd)) {
+        if(!opening)ShowWindow(hwnd,0);
+        SetWindowPos(hwnd,IntPtr.Zero,bounds.x,bounds.y,width,height,0x14);
+        SetLayeredWindowAttributes(hwnd,0,255,2);SetWindowLong(hwnd,-20,style);
+      }
+    }
+    return true;
+  }
+  public static string MirrorFloating(int process,string title,IntPtr owner) {
+    IntPtr hwnd=Find(process,title); if(hwnd==IntPtr.Zero)return "missing";
+    int disable=1;DwmSetWindowAttribute(hwnd,3,ref disable,4);
+    if(!IsIconic(hwnd) && IsWindowVisible(hwnd)) {Rect bounds;if(GetWindowRect(hwnd,out bounds))mirrorBounds[hwnd]=bounds;}
+    // A normal unowned app window participates in Alt+Tab.
+    int style=GetWindowLong(hwnd,-20); int next=(style&~0x80)|0x40000;
+    if(style!=next || GetWindow(hwnd,4)!=IntPtr.Zero) {
+      SetWindowLong(hwnd,-20,next);
+      SetWindowLongPtr(hwnd,-8,IntPtr.Zero);
+      SetWindowPos(hwnd,IntPtr.Zero,0,0,0,0,0x20|0x10|0x4|0x2|0x1);
+    }
+    if(IsIconic(hwnd)) return "minimized";
+    return IsWindowVisible(hwnd)?"visible":"hidden";
+  }
+  [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd,int attribute,out int value,int size);
+  public static bool FullyCovered(IntPtr hwnd) {
+    if(!IsWindowVisible(hwnd)||IsIconic(hwnd)||GetForegroundWindow()==hwnd)return false;
+    Rect r;if(!GetWindowRect(hwnd,out r))return false;
+    IntPtr remaining=CreateRectRgn(r.x,r.y,r.right,r.bottom);
+    try {
+      for(IntPtr above=GetWindow(hwnd,3);above!=IntPtr.Zero;above=GetWindow(above,3)) {
+        int cloaked;DwmGetWindowAttribute(above,14,out cloaked,4);
+        if(!IsWindowVisible(above)||IsIconic(above)||cloaked!=0||(GetWindowLong(above,-20)&(0x80000|0x20))!=0)continue;
+        Rect cover;if(!GetWindowRect(above,out cover))continue;
+        IntPtr region=CreateRectRgn(0,0,0,0);
+        try {
+          if(GetWindowRgn(above,region)<=1) {DeleteObject(region);region=CreateRectRgn(cover.x,cover.y,cover.right,cover.bottom);}
+          else OffsetRgn(region,cover.x,cover.y);
+          if(CombineRgn(remaining,remaining,region,4)==1)return true;
+        }finally{DeleteObject(region);}
+      }
+      return false;
+    }finally{DeleteObject(remaining);}
+  }
+  public static bool PopupTray(IntPtr hwnd) {
+    int style=GetWindowLong(hwnd,-20);SetWindowLong(hwnd,-20,(style|0x80)&~0x40000);return true;
+  }
+  public static bool FocusExternal(int process,string title) {
+    IntPtr hwnd=Find(process,title);if(hwnd==IntPtr.Zero)return false;
+    if(IsIconic(hwnd))ShowWindow(hwnd,9);else ShowWindow(hwnd,5);
+    Message pending;PeekMessage(out pending,IntPtr.Zero,0,0,0);
+    uint pid,own=GetCurrentThreadId(),target=GetWindowThreadProcessId(hwnd,out pid);
+    uint foreground=GetWindowThreadProcessId(GetForegroundWindow(),out pid);
+    bool fg=foreground!=0 && own!=foreground && AttachThreadInput(own,foreground,true);
+    bool appThread=target!=0 && own!=target && foreground!=target && AttachThreadInput(own,target,true);
+    try {
+      SetWindowPos(hwnd,IntPtr.Zero,0,0,0,0,0x3);
+      SetForegroundWindow(hwnd);SetFocus(hwnd);
+      return GetForegroundWindow()==hwnd;
+    } finally {
+      if(appThread)AttachThreadInput(own,target,false);
+      if(fg)AttachThreadInput(own,foreground,false);
+    }
+  }
   public static IntPtr Find(int process,string title) {
     IntPtr result=IntPtr.Zero;
     EnumWindows((hwnd, state) => { uint pid; GetWindowThreadProcessId(hwnd, out pid);
@@ -248,9 +391,13 @@ public static class DesktopWindowBridge {
   [DllImport("user32.dll")] static extern bool EnableWindow(IntPtr hwnd,bool enabled);
   public static void Background(IntPtr hwnd) { EnableWindow(hwnd,false); }
   public static void HostInput(bool active) {
-    lock(gate) { foreach(var pair in appWindows) {
-      if(pair.Key!="__desktop_wallpaper__") EnableWindow(pair.Value,!active);
-    } }
+    List<IntPtr> windows=new List<IntPtr>();
+    lock(gate) {
+      hostEditing=active;
+      foreach(var pair in appWindows) if(pair.Key!="__desktop_wallpaper__" && pair.Key!="__phone_mirror__") windows.Add(pair.Value);
+    }
+    // EnableWindow can synchronously call the SDL thread; never hold the mouse-hook lock here.
+    foreach(IntPtr hwnd in windows) if(IsWindow(hwnd)) EnableWindow(hwnd,!active);
   }
   static readonly Dictionary<string,IntPtr> roundRegions=new Dictionary<string,IntPtr>();
   static readonly Queue<string> roundRegionOrder=new Queue<string>();
@@ -293,6 +440,13 @@ public static class DesktopWindowBridge {
   }
   [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
   [DllImport("imm32.dll")] static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hwnd);
+  static readonly HashSet<IntPtr> rawKeyboardWindows=new HashSet<IntPtr>();
+  public static void RawKeyboard(IntPtr hwnd,bool enabled) { lock(gate) { if(enabled) rawKeyboardWindows.Add(hwnd);else rawKeyboardWindows.Remove(hwnd); } }
+  static void CloseHostIme(IntPtr hwnd) {
+    lock(gate) { if(!rawKeyboardWindows.Contains(hwnd)) return; }
+    IntPtr ime=ImmGetDefaultIMEWnd(hwnd);
+    if(ime!=IntPtr.Zero) { UIntPtr result;SendMessageTimeout(ime,0x283,new UIntPtr(6),IntPtr.Zero,2,30,out result); }
+  }
   [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr hwnd,uint message,UIntPtr wParam,IntPtr lParam,uint flags,uint timeout,out UIntPtr result);
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd,uint flags);
@@ -305,16 +459,32 @@ public static class DesktopWindowBridge {
   public static bool FocusRegistered(string id) {
     IntPtr hwnd;
     lock(gate) { if(!appWindows.TryGetValue(id,out hwnd)) return false; }
-    if(!IsWindow(hwnd) || GetAncestor(GetForegroundWindow(),2)!=GetAncestor(hwnd,2)) return false;
+    if(hostEditing || !IsWindowEnabled(hwnd) || !IsWindow(hwnd) || GetAncestor(GetForegroundWindow(),2)!=GetAncestor(hwnd,2)) return false;
     FocusApp(hwnd); lastInputFocus=hwnd;
     return RegisteredAncestor(Focused())==hwnd;
   }
+  [DllImport("user32.dll")] static extern short GetKeyState(int key);
+  [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] state);
   static void FocusApp(IntPtr hwnd) {
-    // AttachThreadInput requires a message queue on the helper thread.
+    if(hostEditing || !IsWindowEnabled(hwnd)) return;
+    CloseHostIme(hwnd);
+    if(RegisteredAncestor(Focused())==hwnd) return;
     Message pending; PeekMessage(out pending,IntPtr.Zero,0,0,0);
-    uint pid; uint thread=GetWindowThreadProcessId(hwnd,out pid); uint own=GetCurrentThreadId();
-    bool attached=own!=thread && AttachThreadInput(own,thread,true);
-    try { SetFocus(hwnd); } finally { if(attached) AttachThreadInput(own,thread,false); }
+    uint pid; uint target=GetWindowThreadProcessId(hwnd,out pid);
+    uint foreground=GetWindowThreadProcessId(GetForegroundWindow(),out pid);
+    uint own=GetCurrentThreadId();
+    byte[] keys=new byte[256];
+    for(int key=0;key<256;key++) keys[key]=(byte)(((GetAsyncKeyState(key)&0x8000)!=0?0x80:0)|(GetKeyState(key)&1));
+    bool foregroundAttached=own!=foreground && AttachThreadInput(own,foreground,true);
+    bool targetAttached=own!=target && foreground!=target && AttachThreadInput(own,target,true);
+    try {
+      // AttachThreadInput clears the shared keyboard state. Preserve modifier/toggle state.
+      SetKeyboardState(keys);
+      SetFocus(hwnd);
+    } finally {
+      if(targetAttached) AttachThreadInput(own,target,false);
+      if(foregroundAttached) AttachThreadInput(own,foreground,false);
+    }
   }
   public static IntPtr Focused() {
     GuiInfo info=new GuiInfo(); info.size=Marshal.SizeOf(typeof(GuiInfo));
@@ -359,7 +529,7 @@ if($GlassOnly) {
           $scenes[$key]=@{host=$hostWindow;target=$target;sprite=$sprite;geometry=$geometry}
         }
         $scene=$scenes[$key]
-        if($request.refresh){$scene.sprite.Brush=$compositor.CreateHostBackdropBrush()}
+        # Reuse the live backdrop brush; replacing it on each show causes a flash.
         $opacity=if($null -ne $request.opacity){[double]$request.opacity}else{0.78}
         $scene.sprite.Opacity=[single][Math]::Max(0.2,[Math]::Min(1.0,$opacity))
         $size=[DesktopWindowBridge]::SizeGlassHost($hwnd,$scene.host,[int]$request.radius)
@@ -384,11 +554,21 @@ while ($null -ne ($line=[Console]::ReadLine())) {
     $request=$line | ConvertFrom-Json
     $result=$null
     switch ($request.command) {
+      'register-external' {
+        $hwnd=[DesktopWindowBridge]::Find([int]$request.pid,[string]$request.title)
+        $result=$hwnd -ne [IntPtr]::Zero
+        if($result) {
+          $handles[[string]$request.appId]=$hwnd
+          [DesktopWindowBridge]::Register([string]$request.appId,$hwnd)
+          [DesktopWindowBridge]::RawKeyboard($hwnd,([string]$request.keyboard -eq 'uhid'))
+        }
+      }
       'attach' {
         $hwnd=[DesktopWindowBridge]::Attach([int]$request.pid,[string]$request.title,$parent)
         if($hwnd -ne [IntPtr]::Zero) {
           $handles[[string]$request.appId]=$hwnd
           [DesktopWindowBridge]::Register([string]$request.appId,$hwnd)
+          [DesktopWindowBridge]::RawKeyboard($hwnd,([string]$request.keyboard -eq 'uhid'))
           $result=$true
         } else { $result=$false }
       }
@@ -418,6 +598,12 @@ while ($null -ne ($line=[Console]::ReadLine())) {
         $result=@{toolWindow=($style -band 0x80) -ne 0;appWindow=($style -band 0x40000) -ne 0;taskbarRegistered=($style -band 0x40000) -ne 0}
       }
       'mirror-visibility' { $result=[DesktopWindowBridge]::MirrorVisibility([int]$request.pid,[string]$request.title,[bool]$request.hidden) }
+      'popup-tray' { $result=[DesktopWindowBridge]::PopupTray($parent) }
+      'mirror-icon-release' { [DesktopWindowBridge]::ForgetMirrorIcons([int]$request.pid); $result=$true }
+      'mirror-icon' { $result=[DesktopWindowBridge]::MirrorIcon([int]$request.pid,[string]$request.title,[string]$request.icon) }
+      'mirror-floating' { $result=[DesktopWindowBridge]::MirrorFloating([int]$request.pid,[string]$request.title,$parent) }
+      'mirror-transition' { $result=[DesktopWindowBridge]::MirrorTransition([int]$request.pid,[string]$request.title,[bool]$request.opening,[int]$request.x,[int]$request.y) }
+      'mirror-covered' { $hwnd=[DesktopWindowBridge]::Find([int]$request.pid,[string]$request.title); $result=($hwnd -ne [IntPtr]::Zero -and [DesktopWindowBridge]::FullyCovered($hwnd)) }
       'mirror-focus' { $result=[DesktopWindowBridge]::FocusExternal([int]$request.pid,[string]$request.title) }
       'fusion-anchor' {
         Add-Type -AssemblyName UIAutomationClient
@@ -430,7 +616,7 @@ while ($null -ne ($line=[Console]::ReadLine())) {
           foreach($button in $buttons) {
             try {
               $current=$button.Current
-              if($current.AutomationId -like '*FusionLauncher*' -or $current.Name -like '*融合模式*') {
+              if($current.AutomationId -like '*FusionLauncher*' -or $current.Name -like '*桌面模式*') {
                 $r=$current.BoundingRectangle
                 if(-not $r.IsEmpty -and $r.Width -gt 0 -and $r.Height -gt 0){$result=@{x=$r.X;y=$r.Y;width=$r.Width;height=$r.Height};break}
               }
@@ -439,6 +625,7 @@ while ($null -ne ($line=[Console]::ReadLine())) {
           if($null -ne $result){break}
         }
       }
+      'covered' { $result=[DesktopWindowBridge]::FullyCovered($parent) }
       'active' {
         $focused=[DesktopWindowBridge]::Focused(); $result=''
         foreach($key in $handles.Keys) { if($handles[$key] -eq $focused) { $result=$key; break } }

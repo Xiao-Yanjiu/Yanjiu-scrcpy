@@ -1,4 +1,6 @@
 import { app, BrowserWindow } from 'electron'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import path from 'node:path'
 import remote from '@electron/remote/main'
 import { optimizer } from '@electron-toolkit/utils'
 import { globalEventEmitter } from '$electron/helpers/emitter/index.js'
@@ -19,9 +21,21 @@ export default {
 
     app.isQuitting = false
     let quittingPromise = null
+    const logExit = (reason, details = {}) => {
+      try {
+        const directory = app.getPath('logs')
+        mkdirSync(directory, { recursive: true })
+        appendFileSync(path.join(directory, 'lifecycle.log'), `${JSON.stringify({ time: new Date().toISOString(), pid: process.pid, reason, ...details })}\n`)
+      }
+      catch {}
+    }
+    logExit('started')
+    process.on('uncaughtExceptionMonitor', (error, origin) => logExit('uncaught-exception', { origin, error: error.stack || error.message }))
+    process.on('exit', code => logExit('process-exit', { code }))
+    app.on('quit', (_event, code) => logExit('app-quit', { code }))
 
     globalEventEmitter.on('app:quit', () => {
-      requestQuit()
+      requestQuit('tray-or-explicit-quit')
     })
 
     ensureSingleInstance({
@@ -72,7 +86,7 @@ export default {
     })
 
     app.on('window-all-closed', () => {
-      requestQuit()
+      requestQuit('window-all-closed')
     })
 
     app.on('before-quit', (event) => {
@@ -81,10 +95,11 @@ export default {
       }
 
       // Do NOT call event.preventDefault() — let the quit proceed normally.
-      requestQuit()
+      requestQuit('before-quit')
     })
 
-    function requestQuit() {
+    function requestQuit(reason) {
+      logExit(reason, { windows: BrowserWindow.getAllWindows().map(win => ({ id: win.id, title: win.getTitle(), visible: win.isVisible() })) })
       if (app.isQuitting) {
         return
       }

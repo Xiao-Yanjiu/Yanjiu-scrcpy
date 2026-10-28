@@ -21,10 +21,9 @@ export interface SandboxConfigResult {
 /**
  * Sandbox configuration manager
  *
- * The Chromium sandbox stays enabled by default on Linux: deb/rpm installs
- * ship a setuid `chrome-sandbox` helper (see `createLinuxAfterInstall` in
- * `desktop/electron-builder.config.js`), and distros with
- * working unprivileged user namespaces use the namespace sandbox instead.
+ * The Chromium sandbox stays enabled by default on Linux. Packaging does not
+ * elevate the helper or silently opt out by distribution format. Host policy
+ * failures must be reported; explicit environment overrides remain user choices.
  *
  * IMPORTANT: this must run before `app.whenReady()` — Chromium decides on the
  * sandbox (zygote/SUID helper) during browser startup, so switches appended
@@ -65,12 +64,8 @@ export class SandboxManager {
       }
     }
 
-    // AppImage and Flatpak cannot rely on the SUID sandbox helper (the setuid
-    // bit does not survive the mounted image / sandbox) and unprivileged user
-    // namespaces may be restricted (Ubuntu 24.04+), so opt out there.
-    if (this.process.env.APPIMAGE || this.process.env.FLATPAK_ID) {
-      return this.disable('SUID helper unavailable in AppImage/Flatpak')
-    }
+    // Keep Chromium's sandbox enabled for every distribution format.
+    // A host policy failure must be reported, not silently bypassed.
 
     return {
       disabled: false,

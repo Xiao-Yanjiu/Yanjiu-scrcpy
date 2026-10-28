@@ -124,6 +124,12 @@ try {
         : entry.resolve(message.result)
     })
   })
+  const originalParent = (await probe(child.handle)).parent
+  assert.equal(await request('register-external', {
+    appId: '__phone_mirror__', pid: child.pid, title: 'Desktop Bridge Test Child', keyboard: 'uhid',
+  }), true)
+  assert.equal((await probe(child.handle)).parent, originalParent, 'mirror registration must not reparent its native window')
+  await request('forget', { appId: '__phone_mirror__' })
   assert.equal(
     await request('attach', {
       appId: 'child',

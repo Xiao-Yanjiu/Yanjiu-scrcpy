@@ -14,7 +14,7 @@ export function setupEnvPath() {
   const extraScrcpyDirs = {
     win: process.platform === 'win32' ? getExtraPlatformDirs().scrcpy : extraResolve('win/scrcpy'),
     mac: extraResolve(`${platformArch}/scrcpy`),
-    linux: extraResolve(`${platformArch}/scrcpy`),
+    linux: process.platform === 'linux' ? getExtraPlatformDirs().scrcpy : extraResolve(`${platformArch}/scrcpy`),
   }
 
   const extraGnirehtetDirs = {

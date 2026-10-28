@@ -52,6 +52,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // on the sandbox (zygote/SUID helper) — i.e. before `app.whenReady()`.
 configureSandbox()
 
+// X11/XWayland is required to embed the scrcpy application windows.
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('ozone-platform', 'x11')
+  process.env.SDL_VIDEODRIVER = 'x11'
+}
+
 const mainApp = createElectronApp({
   preloadDir: __dirname,
   rendererDir: path.join(__dirname, '../dist'),

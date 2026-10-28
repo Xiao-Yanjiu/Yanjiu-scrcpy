@@ -1,21 +1,10 @@
 import { createLinuxAfterInstall } from './linux-after-install.js'
 
-// Generated at config-load time from electron-builder's own after-install
-// template with the chrome-sandbox SUID fix appended (see linux-after-install.js).
+// Basic packages deliberately do not modify sandbox or device permissions.
 const afterInstall = createLinuxAfterInstall()
 
-/**
- * Linux packaging: AppImage, deb and flatpak for x64 and arm64.
- *
- * deb/rpm share FpmTarget, so both point at the same generated after-install
- * script: electron-builder's default strips the setuid bit from
- * chrome-sandbox when its user-namespace probe false-positives on Ubuntu
- * 24.04+, while the generated script keeps the official install logic
- * (alternatives, mime, desktop, AppArmor) verbatim and forces mode 4755.
- */
-
 export const linux = {
-  icon: 'logo.icns',
+  icon: 'logo.png',
   maintainer: 'viarotel@qq.com',
   category: 'Utility',
   target: [

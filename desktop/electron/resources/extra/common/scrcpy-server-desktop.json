@@ -1,0 +1,8 @@
+{
+  "sha256": "99ade25f1527db731c30aa2b6a02d01020d8f78cdaf60cb1f4ea450d85521b85",
+  "source": "https://github.com/Genymobile/scrcpy/tree/v4.1",
+  "policy": "single-foreground-focus",
+  "version": "4.1",
+  "patch": "Omit OWN_FOCUS; event-driven desktop clipboard coordinator with upstream fallback",
+  "sourceSha256": "1525c92183c4d1f7d4d1a702cfddc5a452da4f49222b0c327a7e8b1e0af14833"
+}

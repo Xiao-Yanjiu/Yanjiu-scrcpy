@@ -12,12 +12,18 @@ export class ProcessManager {
 
   add(process) {
     this.processList.push(process)
+    const remove = () => {
+      this.processList = this.processList.filter(item => item !== process)
+    }
+    process.once('exit', remove)
+    process.once('error', remove)
   }
 
   async kill(process) {
     if (!process) {
       for (const item of this.processList) {
-        await treeKill(item.pid, 'SIGTERM')
+        if (item.pid && item.exitCode == null && item.signalCode == null && !item.killed)
+          await treeKill(item.pid, 'SIGTERM')
       }
 
       this.processList = []

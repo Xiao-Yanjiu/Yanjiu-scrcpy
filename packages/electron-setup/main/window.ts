@@ -178,11 +178,12 @@ export function createWindowManager<TPayload = unknown>(
       base.storage = mainApp.storage
     }
 
+    const encodedPayload = encodePayload(payload)
     base.webPreferences = {
       ...(base.webPreferences || {}),
       additionalArguments: base.webPreferences?.additionalArguments
         ?? mainApp?.additionalArguments
-        ?? [`--payload=${encodePayload(payload)}`],
+        ?? (encodedPayload.length > 8192 ? ['--payload-ipc'] : [`--payload=${encodedPayload}`]),
     }
 
     return base
@@ -221,6 +222,13 @@ export function createWindowManager<TPayload = unknown>(
       instances.set(instanceId, internalWin)
       bindWindowEvents(internalWin, context)
 
+      // Large icons must not enter the renderer command line (Windows has a
+      // process command-line limit). Bind to this WebContents before navigation.
+      internalWin.raw.webContents.on('ipc-message-sync', (event, channel) => {
+        if (channel === 'yanjiu:window-payload')
+          event.returnValue = payload
+      })
+
       // Load page
       if (typeof load === 'function') {
         load(internalWin, context)
@@ -258,9 +266,11 @@ export function createWindowManager<TPayload = unknown>(
       return await windowContext.callAsync(context, async () => {
         await runHook('beforeShow', internalExisting.raw, context)
         emitter.emit('before-show', internalExisting.raw)
-        internalExisting.raw.restore?.()
-        internalExisting.raw.show?.()
-        internalExisting.raw.focus?.()
+        if (meta.show !== false) {
+          internalExisting.raw.restore?.()
+          internalExisting.raw.show?.()
+          internalExisting.raw.focus?.()
+        }
         await runHook('shown', internalExisting.raw, context)
         emitter.emit('shown', internalExisting.raw)
         // Return raw BrowserWindow

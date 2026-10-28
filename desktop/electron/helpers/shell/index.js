@@ -113,7 +113,7 @@ export function sheller(command, options = {}) {
   })
 
   const kill = async () => {
-    if (!child.pid) {
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null || child.killed) {
       return false
     }
     await treeKill(child.pid, 'SIGTERM')

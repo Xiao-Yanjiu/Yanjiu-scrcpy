@@ -142,7 +142,7 @@ export default {
       if (tray)
         return
 
-      tray = new Tray(trayPath)
+      tray = new Tray(trayPath, '30ed865d-cd26-4497-870b-f17cb2fd8c80')
 
       tray.setToolTip('Yanjiu-scrcpy')
 

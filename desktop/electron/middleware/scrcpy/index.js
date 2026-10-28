@@ -14,18 +14,21 @@ electronAPI.ipcRenderer.on('quit-before', () => {
 })
 
 function normalizeScrcpyError(error) {
-  const message = error?.stderr || error?.message || String(error)
-  throw new Error(message)
+  const details = [error?.stderr, error?.stdout].map(value => value == null ? '' : String(value).trim()).filter(Boolean).join('\n')
+  return new Error(details.slice(-6000) || error?.message || String(error))
 }
 
 function createScrcpyProcess(command, options = {}) {
+  // Disabled forwarding wins over a previously saved audio duplication option.
+  if (/(?:^|\s)--no-audio(?=\s|$)/.test(command))
+    command = command.replace(/(?:^|\s)--audio-dup(?=\s|$)/g, ' ')
   let mirrorProcess = null
 
   const {
     args = '',
     resolveOnReady = false,
     resolveOnSpawn = false,
-    readyPattern = /(?:Renderer:|Texture:|\[server\]\s+INFO:\s+Device:)/i,
+    readyPattern = /(?:Renderer:|Texture:)/i,
     getReadyValue = () => void 0,
     readyErrorMessage = 'scrcpy process exited before ready',
     stdout,
@@ -37,12 +40,13 @@ function createScrcpyProcess(command, options = {}) {
     ? createDeferred()
     : null
 
+  let outputTail = ''
   function resolveReady(data) {
     if (!readyDeferred || !resolveOnReady) {
       return
     }
 
-    const text = String(data)
+    const text = outputTail = (outputTail + String(data)).slice(-8000)
 
     if (!text.trim()) {
       return
@@ -94,9 +98,14 @@ function createScrcpyProcess(command, options = {}) {
       return result
     })
     .catch((error) => {
-      readyDeferred?.reject(error)
-      normalizeScrcpyError(error)
+      const failure = normalizeScrcpyError(error)
+      readyDeferred?.reject(failure)
+      throw failure
     })
+
+  // The readiness promise is returned separately. Always observe process exit.
+  if (readyDeferred)
+    exitPromise.catch(() => {})
 
   const promise = readyDeferred
     ? readyDeferred.promise

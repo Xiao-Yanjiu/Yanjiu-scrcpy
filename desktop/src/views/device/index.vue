@@ -95,22 +95,7 @@
           min-width="150"
         >
           <div class="flex items-center gap-1 !*:ml-0">
-            <el-button v-if="['device', 'unauthorized'].includes(row.status)" type="primary" text circle title="融合模式" class="desktop-launch-action" @click="openFusion(row)">
-              <svg class="fusion-taiji" width="22" height="22" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <g transform="translate(-1.7 -0.8) translate(32 32) scale(.88) translate(-32 -32)"><path d="M32 6A26 26 0 0 0 32 58C17.64 58 17.64 32 32 32C46.36 32 46.36 6 32 6Z" /><circle cx="32" cy="19" r="3.4" /></g>
-                <g transform="translate(1.7 .8) translate(32 32) scale(.88) rotate(180) translate(-32 -32)"><path d="M32 6A26 26 0 0 0 32 58C17.64 58 17.64 32 32 32C46.36 32 46.36 6 32 6Z" /><circle cx="32" cy="19" r="3.4" /></g>
-              </svg>
-            </el-button>
-            <el-button
-              v-if="['device', 'unauthorized'].includes(row.status)"
-              type="primary"
-              text
-              circle
-              icon="Monitor"
-              title="Android 桌面"
-              class="desktop-launch-action"
-              @click="openDesktop(row)"
-            />
+            <el-button v-if="['device', 'unauthorized'].includes(row.status)" type="primary" text circle icon="Monitor" title="桌面模式" class="desktop-launch-action" @click="openFusion(row)" />
             <ConnectAction
               v-if="['offline'].includes(row.status) && row.wifi"
               v-bind="{
@@ -195,10 +180,7 @@ const deviceStore = useDeviceStore()
 const preferenceStore = usePreferenceStore()
 
 function openFusion(row) {
-  window.$preload.win.open('pages/desktop', { device: toRaw(row), fusionRole: 'launcher', instanceId: `fusion:${row.id}` })
-}
-function openDesktop(row) {
-  window.$preload.win.open('pages/desktop', { device: toRaw(row), instanceId: row.id })
+  window.$preload.win.open('pages/desktop', { device: toRaw(row), fusionRole: 'launcher', show: false, instanceId: `fusion:${row.id}` })
 }
 
 const loading = ref(false)
@@ -241,7 +223,6 @@ function remarkFilterMethod(value, row, column) {
   return target === value
 }
 
-const autoDesktopDevices = new Set()
 const autoFusionDevices = new Set()
 
 async function getDeviceData(options = {}) {
@@ -254,10 +235,6 @@ async function getDeviceData(options = {}) {
   try {
     await deviceStore.getList()
     const available = new Set(deviceStore.list.filter(item => item.status === 'device').map(item => item.id))
-    for (const id of autoDesktopDevices) {
-      if (!available.has(id))
-        autoDesktopDevices.delete(id)
-    }
     for (const id of autoFusionDevices) {
       if (!available.has(id))
         autoFusionDevices.delete(id)
@@ -268,25 +245,11 @@ async function getDeviceData(options = {}) {
           continue
         autoFusionDevices.add(device.id)
         try {
-          await window.$preload.win.open('pages/desktop', { device: toRaw(device), fusionRole: 'launcher', instanceId: `fusion:${device.id}` })
+          await window.$preload.win.open('pages/desktop', { device: toRaw(device), fusionRole: 'launcher', show: false, instanceId: `fusion:${device.id}` })
         }
         catch (error) {
           autoFusionDevices.delete(device.id)
-          console.warn('自动打开融合模式失败', error)
-        }
-      }
-    }
-    if (preferenceStore.data.desktopAutoOpen) {
-      for (const device of deviceStore.list) {
-        if (device.status !== 'device' || autoDesktopDevices.has(device.id))
-          continue
-        autoDesktopDevices.add(device.id)
-        try {
-          await window.$preload.win.open('pages/desktop', { device: toRaw(device), instanceId: device.id })
-        }
-        catch (error) {
-          autoDesktopDevices.delete(device.id)
-          console.warn('自动打开桌面失败', error)
+          console.warn('自动打开桌面模式失败', error)
         }
       }
     }
