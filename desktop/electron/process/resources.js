@@ -9,7 +9,7 @@ export const PLATFORM_MAP = Object.freeze({
 })
 
 export function extraResolve(filePath) {
-  const isProduction = import.meta.env.MODE === 'production'
+  const isProduction = process.env.IS_PACKAGED === 'true'
 
   const basePath = isProduction ? process.resourcesPath : 'electron/resources'
 
@@ -19,7 +19,7 @@ export function extraResolve(filePath) {
 }
 
 export function buildResolve(value) {
-  return import.meta.env.MODE === 'production'
+  return process.env.IS_PACKAGED === 'true'
     ? resolve(process.resourcesPath, 'build', value)
     : resolve('electron/resources/build', value)
 }
@@ -43,7 +43,7 @@ export function getExtraPlatformDirs() {
 
   const adjacentScrcpy = resolve(dirname(process.execPath), 'scrcpy')
   const scrcpyBinary = platform === 'win' ? 'scrcpy.exe' : 'scrcpy'
-  const scrcpyDir = import.meta.env.MODE === 'production' && ['win', 'linux'].includes(platform)
+  const scrcpyDir = process.env.IS_PACKAGED === 'true' && ['win', 'linux'].includes(platform)
     && existsSync(resolve(adjacentScrcpy, scrcpyBinary))
     ? adjacentScrcpy
     : extraResolve(`${platformArch}/scrcpy`)

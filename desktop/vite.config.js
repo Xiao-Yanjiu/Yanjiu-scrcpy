@@ -47,12 +47,12 @@ function mergeCommon(config) {
 }
 
 export default defineConfig((args) => {
-  rmSync('dist-electron', { recursive: true, force: true })
-
   const { command } = args
 
   const isServe = command === 'serve'
   const isBuild = command === 'build'
+  const electronOutDir = isServe ? 'dist-electron-dev' : 'dist-electron'
+  rmSync(electronOutDir, { recursive: true, force: true })
   const sourcemap = (isServe || !!process.env.VSCODE_DEBUG) ? 'inline' : undefined
 
   return mergeCommon(
@@ -123,10 +123,12 @@ export default defineConfig((args) => {
           main: {
             entry: 'electron/main.js',
             vite: mergeCommon({
+              mode: args.mode,
+              build: { outDir: electronOutDir },
               plugins: [notBundle()],
             }, args),
             async onstart(args) {
-              await args.startup()
+              await args.startup([resolve(electronOutDir, 'main.js')])
               // Capture native/fatal exits from the parent, even when Electron
               // cannot flush its own log. The plugin exits Node immediately.
               process.electronApp?.prependOnceListener('exit', (code, signal) => {
@@ -142,10 +144,15 @@ export default defineConfig((args) => {
           preload: {
             entry: 'electron/preload.js',
             vite: mergeCommon({
+              mode: args.mode,
+              build: { outDir: electronOutDir },
               plugins: [notBundle()],
             }, args),
-            onstart(args) {
-              args.reload()
+            async onstart(args) {
+              if (process.electronApp)
+                args.reload()
+              else
+                await args.startup([resolve(electronOutDir, 'main.js')])
             },
           },
           renderer: {},

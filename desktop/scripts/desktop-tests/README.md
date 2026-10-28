@@ -30,3 +30,17 @@ Ctrl+V and UHID paste acknowledgements remain enabled. If the relay cannot start
 or exits, the lease is released and upstream autosync resumes. There is no PC
 clipboard polling, initial clipboard overwrite, APK installation, or clipboard
 content logging. The relay sends text up to 256 KiB, coalescing rapid changes.
+
+## Packaged startup regression
+
+After preparing a Windows folder package, run:
+
+```powershell
+node desktop/scripts/desktop-tests/test-portable-startup.mjs "<folder>/Yanjiu-scrcpy.exe"
+```
+
+This starts that exact executable minimized with its local inspector, validates
+production file loading and preload availability, then stops only its own child.
+It creates fresh portable Data in that folder; do not include those test data in
+the published ZIP. Source development uses dist-electron-dev, while production
+builds use dist-electron, so a live Vite server cannot replace release main code.
