@@ -7,6 +7,13 @@ import { execSync } from 'node:child_process'
  * configured, letting electron-builder fall back to the official source.
  */
 export function resolveElectronMirror() {
-  const raw = execSync('npm config get electron_mirror').toString().trim()
-  return (raw && raw !== 'undefined') ? raw : undefined
+  if (process.env.ELECTRON_MIRROR)
+    return process.env.ELECTRON_MIRROR
+  try {
+    const raw = execSync('npm config get electron_mirror', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+    return (raw && raw !== 'undefined') ? raw : undefined
+  }
+  catch {
+    return undefined
+  }
 }

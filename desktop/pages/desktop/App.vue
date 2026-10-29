@@ -696,7 +696,7 @@
       </article>
     </TransitionGroup>
     <div
-      v-if="fullscreenId || fusionFullscreen"
+      v-if="!isFusionApp && fullscreenId"
       class="fullscreen-float"
       :class="{ expanded: floatOpen, dragging: floatDragging, left: floatPosition.side === 'left' }"
       :style="{ top: `${floatPosition.y * 100}%` }"
@@ -3080,6 +3080,7 @@ onMounted(() => {
   window.$preload.ipcRenderer.on('fusion-launcher-blur', fusionBlur)
   window.$preload.ipcRenderer.on('fusion-launcher-open', fusionOpen)
   window.$preload.ipcRenderer.on('desktop-host-fullscreen', hostFullscreenChanged)
+  window.$preload.ipcRenderer.on('desktop-fullscreen-exit', exitFullscreen)
   window.$preload.ipcRenderer.on('fusion-attach-task', fusionAttachTask)
   resolvePreferenceIdentity().finally(() => {
     preferencesReady = true
@@ -3124,6 +3125,7 @@ onBeforeUnmount(() => {
   window.$preload.ipcRenderer.removeListener('fusion-launcher-blur', fusionBlur)
   window.$preload.ipcRenderer.removeListener('fusion-launcher-open', fusionOpen)
   window.$preload.ipcRenderer.removeListener('desktop-host-fullscreen', hostFullscreenChanged)
+  window.$preload.ipcRenderer.removeListener('desktop-fullscreen-exit', exitFullscreen)
   window.$preload.ipcRenderer.removeListener('fusion-attach-task', fusionAttachTask)
   clearInterval(controlPoll)
   ++controlGeneration

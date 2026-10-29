@@ -44,3 +44,14 @@ production file loading and preload availability, then stops only its own child.
 It creates fresh portable Data in that folder; do not include those test data in
 the published ZIP. Source development uses dist-electron-dev, while production
 builds use dist-electron, so a live Vite server cannot replace release main code.
+
+## Floating controls regression
+
+```powershell
+node desktop/scripts/desktop-tests/test-floating-controls.mjs
+```
+
+Checks that fullscreen controls use a small transparent owned window instead of
+cutting a black rectangle out of native video; covers drag bounds, saved side,
+boss-key hiding, fullscreen exit cleanup, and minimized bubble top-order refresh
+without taking keyboard focus.

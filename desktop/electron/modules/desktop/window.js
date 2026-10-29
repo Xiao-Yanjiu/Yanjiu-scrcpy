@@ -32,6 +32,83 @@ function fusionIconPath(icon) {
   return file
 }
 
+// Native video children cannot show transparent HTML through a cut-out. Keep
+// the fullscreen control in its own small, truly transparent owned window.
+const fullscreenControls = new Map()
+function fullscreenControlPage() {
+  return `<!doctype html><meta charset="utf-8"><style>
+  html,body{margin:0;width:100%;height:100%;background:transparent!important;overflow:hidden}
+  #zone{width:80px;height:80px;display:flex;align-items:center;justify-content:flex-end}
+  button{width:44px;height:44px;flex:none;border:1px solid #ffffff55;border-radius:50%;background:#555b;color:white;box-shadow:none;display:grid;place-items:center;transform:translateX(22px);transition:transform .2s;touch-action:none;padding:0}
+  body.left #zone{justify-content:flex-start}body.left button{transform:translateX(-22px)}
+  #zone:hover button,button.dragging{transform:translateX(0)}svg{width:20px;height:20px;pointer-events:none}
+  </style><div id="zone"><button title="退出全屏（拖动调整位置）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3v6H3m12-6v6h6M9 21v-6H3m12 6v-6h6"/></svg></button></div>
+  <script>const {ipcRenderer}=require('electron');const button=document.querySelector('button');let press;
+  button.onpointerdown=e=>{if(e.button!==0)return;press={x:e.screenX,y:e.screenY,moved:false};button.setPointerCapture(e.pointerId);button.classList.add('dragging')};
+  button.onpointermove=e=>{if(!press)return;if(Math.hypot(e.screenX-press.x,e.screenY-press.y)>5)press.moved=true;if(press.moved)ipcRenderer.send('desktop-fullscreen-control',{action:'move',x:e.screenX,y:e.screenY})};
+  button.onpointerup=e=>{if(!press)return;ipcRenderer.send('desktop-fullscreen-control',{action:press.moved?'save':'exit'});press=null;button.classList.remove('dragging');if(button.hasPointerCapture(e.pointerId))button.releasePointerCapture(e.pointerId)};
+  button.onpointercancel=()=>{press=null;button.classList.remove('dragging')};
+  button.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();ipcRenderer.send('desktop-fullscreen-control',{action:'exit'})}};
+  ipcRenderer.on('fullscreen-position',(_,left)=>document.body.classList.toggle('left',left));</script>`
+}
+function attachFullscreenControl(host) {
+  let control
+  let loading
+  const saved = store.get('fullscreenControlPosition') || {}
+  let position = { side: saved.side === 'left' ? 'left' : 'right', y: Number.isFinite(saved.y) ? Math.max(0, Math.min(1, saved.y)) : 0.45 }
+  const place = () => {
+    if (!control || control.isDestroyed() || host.isDestroyed())
+      return
+    const area = screen.getDisplayMatching(host.getBounds()).bounds
+    control.setPosition(position.side === 'left' ? area.x : area.x + area.width - 80, Math.round(area.y + position.y * Math.max(0, area.height - 80)))
+    control.webContents.send('fullscreen-position', position.side === 'left')
+  }
+  const update = async () => {
+    if (host.isDestroyed())
+      return
+    if (!host.isFullScreen() || !host.isVisible() || host.isMinimized() || app.bossHidden) {
+      control?.hide()
+      return
+    }
+    if (!control) {
+      control = new BrowserWindow({ parent: host, width: 80, height: 80, frame: false, transparent: true, backgroundColor: '#00000000', hasShadow: false, skipTaskbar: true, focusable: false, resizable: false, show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false } })
+      const controlId = control.webContents.id
+      control.once('closed', () => fullscreenControls.delete(controlId))
+      control.keepTaskbarHidden = true
+      control.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      control.webContents.on('will-navigate', event => event.preventDefault())
+      fullscreenControls.set(control.webContents.id, {
+        host,
+        move(x, y) {
+          const area = screen.getDisplayMatching(host.getBounds()).bounds
+          position = { side: x < area.x + area.width / 2 ? 'left' : 'right', y: Math.max(0, Math.min(1, (y - area.y - 40) / Math.max(1, area.height - 80))) }
+          place()
+        },
+        save() { store.set('fullscreenControlPosition', position) },
+      })
+      loading = control.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(fullscreenControlPage())}`)
+    }
+    await loading
+    if (host.isDestroyed() || control.isDestroyed() || !host.isFullScreen() || !host.isVisible() || host.isMinimized() || app.bossHidden)
+      return
+    place()
+    control.setAlwaysOnTop(true, 'screen-saver')
+    control.showInactive()
+    control.moveTop()
+  }
+  const refresh = () => update().catch(error => console.warn('Fullscreen control:', error.message))
+  for (const event of ['enter-full-screen', 'leave-full-screen', 'show', 'hide', 'minimize', 'restore', 'moved', 'resized'])
+    host.on(event, refresh)
+  globalEventEmitter.on('boss:visibility', refresh)
+  host.once('closed', () => {
+    globalEventEmitter.removeListener('boss:visibility', refresh)
+    if (control && !control.isDestroyed()) {
+      fullscreenControls.delete(control.webContents.id)
+      control.destroy()
+    }
+  })
+}
+
 const floatingTargets = new Set()
 // Local, generated UI only: notification text is assigned through textContent.
 function floatingPage(icon, name) {
@@ -106,8 +183,12 @@ export function registerFloatingTarget({ deviceId, packageName, name, icon, rest
       target.bubble.setShape(shape)
     }
     target.bubble.webContents.send('float-state', { minimized: target.minimized, notice, clear, hideNotice: Date.now() >= target.noticeUntil, light: store.get('common.theme') === 'light' || (store.get('common.theme') === 'system' && !store.get('common.isDark')) })
+    // Reassert the topmost order without taking keyboard focus. A native mirror
+    // or another topmost application can otherwise cover an existing bubble.
+    target.bubble.setAlwaysOnTop(true, 'screen-saver')
     if (!target.bubble.isVisible())
       target.bubble.showInactive()
+    target.bubble.moveTop()
   }
   target.dispose = () => {
     target.closed = true
@@ -168,6 +249,17 @@ async function animateWindow(win, opening, target) {
 export default {
   name: 'module:desktop:window',
   apply() {
+    ipcMain.on('desktop-fullscreen-control', (event, request = {}) => {
+      const target = fullscreenControls.get(event.sender.id)
+      if (!target || target.host.isDestroyed() || !target.host.isFullScreen() || app.bossHidden)
+        return
+      if (request.action === 'exit')
+        target.host.webContents.send('desktop-fullscreen-exit')
+      else if (request.action === 'move' && Number.isFinite(request.x) && Number.isFinite(request.y))
+        target.move(request.x, request.y)
+      else if (request.action === 'save')
+        target.save()
+    })
     ipcMain.on('fusion-float-action', (event, request = {}) => {
       const target = [...floatingTargets].find(item => item.bubble?.webContents === event.sender)
       if (!target || app.bossHidden)
@@ -250,6 +342,8 @@ export default {
         async created(win, { payload, manager }) {
           if (!payload.fusionRole)
             return
+          if (payload.fusionRole === 'app')
+            attachFullscreenControl(win)
           win.fusionRole = payload.fusionRole
           win.fusionDeviceId = payload.device?.id
           win.fusionBoundsKey = fusionKey(payload)
