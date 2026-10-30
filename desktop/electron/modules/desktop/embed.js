@@ -690,6 +690,16 @@ function routeTasks(owner, tasks) {
     if ((task.floating && (fromControl || source)) || (fromControl && task.focused === false))
       continue
     const call = task.displayId === 0 && /^(?:com\.tencent\.(?:mm|mobileqq)|com\.android\.(?:incallui|dialer|server\.telecom)|com\.(?:miui|google\.android)\.(?:incallui|dialer))$/.test(task.packageName) && /incall|voip|multitalk|calling|VideoActivity|AVActivity/i.test(task.component)
+    // Display 0 belongs to a live mirror, including WeChat call activities whose
+    // component names vary by version. Route only virtual-display tasks here.
+    const mirrorDeviceId = owner.tasks?.deviceId
+    if (task.displayId === 0 && mirrorDeviceId && [...owners.values()].some(candidate => !candidate.closed
+      && ((candidate.win.fusionDeviceId === mirrorDeviceId && candidate.phoneMirror
+        && candidate.phoneMirror.exitCode === null && !candidate.phoneMirror.killed)
+      || [...candidate.sessions.values()].some(session => session.mirror && session.deviceId === mirrorDeviceId
+        && session.child && session.child.exitCode === null && !session.child.killed)))) {
+      continue
+    }
     if (owner.win.fusionRole === 'launcher' && !call)
       continue
     if (!fromControl && !call && (!source || source[1].packageName === task.packageName))

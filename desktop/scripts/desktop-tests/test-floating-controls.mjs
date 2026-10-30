@@ -40,6 +40,7 @@ const context = vm.createContext({
   BrowserWindow: Window, globalEventEmitter: emitter, app,
   store: { get: key => store.get(key), set: (key, value) => store.set(key, value) },
   screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1200, height: 900 } }), getDisplayMatching: () => ({ bounds: { x: 0, y: 0, width: 1200, height: 900 } }) },
+  setInterval: () => 1, clearInterval() {},
   process: { platform: 'win32' }, nativeImage: {}, trayPath: '', console,
 })
 const start = source.indexOf('const fullscreenControls = new Map()')
@@ -54,7 +55,7 @@ const control = created.at(-1)
 assert.equal(control.options.transparent, true)
 assert.equal(control.options.backgroundColor, '#00000000')
 assert.equal(control.options.hasShadow, false)
-assert.equal(control.options.parent, host)
+assert.equal(control.options.parent, undefined)
 assert.equal(control.visible, true)
 assert.match(control.html, /background:transparent!important/)
 assert.equal(control.options.width, 80)

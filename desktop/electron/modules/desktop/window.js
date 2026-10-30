@@ -71,7 +71,7 @@ function attachFullscreenControl(host) {
       return
     }
     if (!control) {
-      control = new BrowserWindow({ parent: host, width: 80, height: 80, frame: false, transparent: true, backgroundColor: '#00000000', hasShadow: false, skipTaskbar: true, focusable: false, resizable: false, show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false } })
+      control = new BrowserWindow({ width: 80, height: 80, frame: false, transparent: true, backgroundColor: '#00000000', hasShadow: false, skipTaskbar: true, focusable: false, resizable: false, show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false } })
       const controlId = control.webContents.id
       control.once('closed', () => fullscreenControls.delete(controlId))
       control.keepTaskbarHidden = true
@@ -99,8 +99,12 @@ function attachFullscreenControl(host) {
   const refresh = () => update().catch(error => console.warn('Fullscreen control:', error.message))
   for (const event of ['enter-full-screen', 'leave-full-screen', 'show', 'hide', 'minimize', 'restore', 'moved', 'resized'])
     host.on(event, refresh)
+  // Fullscreen transitions may reorder/hide owned windows on Windows. Keep
+  // this independent tool window visible after the native transition settles.
+  const visibilityTimer = setInterval(refresh, 500)
   globalEventEmitter.on('boss:visibility', refresh)
   host.once('closed', () => {
+    clearInterval(visibilityTimer)
     globalEventEmitter.removeListener('boss:visibility', refresh)
     if (control && !control.isDestroyed()) {
       fullscreenControls.delete(control.webContents.id)
