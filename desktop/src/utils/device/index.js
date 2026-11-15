@@ -89,13 +89,3 @@ export function openFloatControl(device) {
   window.$preload.win.open('pages/control', { device })
   return true
 }
-
-export function removeDevices(...devices) {
-  const storeDevices = { ...(window.$preload.store.get('device') || {}) }
-
-  for (const device of devices) {
-    delete storeDevices[device.id ?? device]
-  }
-
-  window.$preload.store.set('device', storeDevices)
-}

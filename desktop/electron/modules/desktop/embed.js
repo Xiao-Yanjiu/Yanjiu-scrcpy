@@ -1,3 +1,4 @@
+import { createNotificationRelay, notificationCompanionInstalled, notificationPackage } from './notification-relay.js'
 import { createHash } from 'node:crypto'
 import store from '$electron/helpers/store/index.js'
 import { registerFloatingTarget } from './window.js'
@@ -139,6 +140,23 @@ const taskStreamStarts = new Map()
 const deviceInputFocus = new Map()
 const latestInputIntent = new Map()
 const batteryReadings = new Map()
+const notificationRelay = createNotificationRelay({
+  adb,
+  sourceChanged(owner, active) {
+    if (owner.notificationPushActive !== active) {
+      owner.notificationPushActive = active
+      globalEventEmitter.emit('desktop:notification-source-changed', owner)
+    }
+    owner.webContents.send('desktop-notification-source', active)
+  },
+  publish(owner, notices, _deviceId, posted) {
+    owner.webContents.send('desktop-notification-push', notices)
+    if (owner.fusionRole === 'launcher')
+      globalEventEmitter.emit('desktop:notification-snapshot', { owner, notices, posted, background: true })
+  },
+})
+app.once('before-quit', () => notificationRelay.close())
+
 const notificationApps = new Map()
 const notificationReads = new Map()
 const notificationDetails = new Map()
@@ -1312,7 +1330,6 @@ async function collectPhoneNotifications(deviceId, details) {
     appName: info[item.packageName]?.name || item.packageName,
     icon: info[item.packageName]?.icon || '',
   }))
-  globalEventEmitter.emit('desktop:notification-snapshot', { deviceId, notices: result })
   return result
 }
 async function deviceLayout(deviceId) {
@@ -1839,7 +1856,7 @@ export default {
             }
             finally { transitioning = false }
           }
-          floating = registerFloatingTarget({ deviceId, nativeFocus: true, name: '手机镜像', icon: nativeImage.createFromPath(extraResolve('common/phone-mirror/scrcpy.png')).toDataURL(), isMinimized: () => minimized, restore: async () => {
+          floating = registerFloatingTarget({ nativeFocus: true, name: '手机镜像', icon: nativeImage.createFromPath(extraResolve('common/phone-mirror/scrcpy.png')).toDataURL(), isMinimized: () => minimized, restore: async () => {
             if (transitioning)
               return
             await transition(true)
@@ -2193,9 +2210,40 @@ export default {
         )
       },
     )
+    ipcMain.handle('desktop-notification-setup', async (event, deviceId, options) => {
+      if (!BrowserWindow.fromWebContents(event.sender))
+        throw new Error('窗口不可用')
+      const id = serial(deviceId)
+      // Installation is invoked only by the explicit setup button.
+      const installed = await notificationCompanionInstalled(adb, id)
+      if (!installed && options?.install !== true)
+        throw new Error('通知助手尚未安装，请到设置中点击“安装／设置通知助手”')
+      if (options?.install === true) {
+        // Explicit setup also updates the bundled helper; reconnects never install.
+        const output = await adb(id, ['install', '-r', extraResolve('common/notification-companion.apk')], { timeout: 120000 })
+        if (!/Success/.test(output))
+          throw new Error('手机安装未完成，请确认手机上的安装提示')
+      }
+      await adb(id, ['shell', 'am', 'start', '-n', `${notificationPackage}/.SetupActivity`])
+      notificationRelay.retry(id)
+      return { success: true }
+    })
+    ipcMain.handle('desktop-notification-refresh', async (event, deviceId) => {
+      const owner = desktopWindow(event)
+      const id = serial(deviceId)
+      notificationRelay.retry(id)
+      await notificationRelay.read(owner, id)
+      return { connected: Boolean(owner.notificationPushActive) }
+    })
     ipcMain.handle('desktop-notifications', async (event, deviceId, options) => {
-      desktopWindow(event)
-      return readPhoneNotifications(serial(deviceId), options?.details !== false)
+      const owner = desktopWindow(event)
+      const id = serial(deviceId)
+      const pushed = await notificationRelay.read(owner, id)
+      const notices = pushed ?? await readPhoneNotifications(id, options?.details !== false)
+      if (owner.fusionRole === 'launcher' && !owner.isDestroyed()) {
+        globalEventEmitter.emit('desktop:notification-snapshot', { owner, notices, background: options?.details === false })
+      }
+      return notices
     })
     ipcMain.handle('desktop-device-state', async (event, deviceId) => {
       desktopWindow(event)

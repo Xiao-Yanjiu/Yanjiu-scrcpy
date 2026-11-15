@@ -27,9 +27,8 @@
           </el-segmented>
         </div>
       </template>
-
       <template #right>
-        <QuickBar class="" />
+        <el-button class="app-region-no-drag" text circle icon="Refresh" :loading="refreshingDevices" title="刷新设备" @click="refreshDevices" />
       </template>
     </AppHeader>
 
@@ -47,13 +46,24 @@
 <script setup>
 import brandLogo from '$electron/resources/build/logo.png'
 import AppHeader from '$/components/app-header/index.vue'
-import QuickBar from '$/components/quick-bar/index.vue'
 import AppUpdateDialog from '$/hooks/use-app-update/dialog.vue'
 
 defineOptions({
   inheritAttrs: false,
 })
 
+const deviceStore = useDeviceStore()
+const refreshingDevices = ref(false)
+async function refreshDevices() {
+  if (refreshingDevices.value)
+    return
+  refreshingDevices.value = true
+  try {
+    await deviceStore.getList()
+  }
+  catch (error) { ElMessage.warning(error.message) }
+  finally { refreshingDevices.value = false }
+}
 const router = useRouter()
 const route = useRoute()
 const windowExpanded = ref(false)

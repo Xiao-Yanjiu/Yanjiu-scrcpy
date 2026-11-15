@@ -9,7 +9,7 @@
     <template v-if="!loading" #icon>
       <i class="i-bi-wifi"></i>
     </template>
-    {{ loading ? loadingText : $t('device.wireless.connect.discover') }}
+    {{ loading ? loadingText : '发现' }}
   </el-button>
 </template>
 

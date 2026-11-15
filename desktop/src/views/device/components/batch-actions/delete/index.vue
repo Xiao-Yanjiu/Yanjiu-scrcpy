@@ -3,8 +3,6 @@
 </template>
 
 <script setup>
-import { removeDevices } from '$/utils/device/index.js'
-
 defineOptions({ inheritAttrs: false })
 
 const props = defineProps({
@@ -15,7 +13,6 @@ const props = defineProps({
 })
 
 const loading = ref(false)
-
 const deviceStore = useDeviceStore()
 
 async function handleClick(devices) {
@@ -34,8 +31,7 @@ async function handleClick(devices) {
 
   loading.value = true
 
-  await removeDevices(...devices)
-  await deviceStore.getList()
+  deviceStore.remove(...devices)
 
   loading.value = false
 }

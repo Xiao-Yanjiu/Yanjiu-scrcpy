@@ -5,7 +5,7 @@ import { deviceStatus as deviceStatusDict } from '$/dicts/device/index.js'
  * Retrieve device name
  */
 export function getDeviceName(device) {
-  return device.product ? device.product.split(':')[1] : 'Unauthorized device'
+  return device.model?.split(':').at(-1) || device.product?.split(':').at(-1) || getRemark(device.id) || device.id
 }
 
 /**

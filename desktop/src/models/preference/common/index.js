@@ -229,7 +229,6 @@ export default {
       field: 'bossKey',
       type: 'BossKey',
       value: '',
-      span: 24,
     },
   },
 }

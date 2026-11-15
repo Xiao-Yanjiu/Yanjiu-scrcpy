@@ -1,101 +1,33 @@
 <template>
   <div class="devices-page h-full flex flex-col">
-    <BatchActions
-      class="overflow-hidden transition-all"
-      :class="hasSelection ? 'max-h-12 opacity-100 mb-2' : 'max-h-0 opacity-0 mb-0'"
-      :devices="selectedRows"
-    />
-
-    <div class="flex-1 min-h-0 overflow-hidden">
-      <el-table
-        ref="tableRef"
-        v-loading="loading && !deviceList.length"
-        :element-loading-text="$t('common.loading')"
-        :data="deviceList"
-        style="width: 100%"
-        height="100%"
-        row-key="id"
-        class="el-table--beautify device-table"
-        @selection-change="onSelectionChange"
-      >
-        <template #empty>
-          <AppEmpty v-show="!loading" :sub-title="$t('device.list.empty')">
-          </AppEmpty>
-        </template>
-
-        <el-table-column type="selection" width="30"></el-table-column>
-
-        <el-table-column
-          :label="$t('device.serial')"
-          sortable
-          show-overflow-tooltip
-          align="left"
-          min-width="250"
-        >
-          <template #default="{ row }">
-            <div class="flex items-center gap-2 relative">
-              <DevicePopover :key="row.status" :device="row" class="" />
-
-              <div class="flex-none max-w-[75%] truncate">
-                {{ row.id }}
-              </div>
-
-              <el-link type="primary" underline="never" title="WIFI" class="flex-none">
-                <i v-if="row.wifi" class="i-bi-wifi"></i>
-              </el-link>
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column
-          :label="$t('device.name')"
-          prop="remark"
-          sortable
-          show-overflow-tooltip
-          align="left"
-          min-width="150"
-          :filters="remarkFilters"
-          :filter-method="remarkFilterMethod"
-        >
-          <template #default="{ row }">
-            <Remark :device="row" class="" />
-          </template>
-        </el-table-column>
-
-        <el-table-column
-          v-slot="{ row }"
-          :label="$t('device.status')"
-          prop="status"
-          align="left"
-          sortable
-          show-overflow-tooltip
-          min-width="150"
-          :filters="statusFilters"
-          :filter-method="filterMethod"
-        >
-          <el-tag effect="plain" class="el-tag--plain-text" :type="getDictLabel('deviceStatus', row.status, { labelKey: 'tagType' })">
-            <div class="flex items-center">
-              <el-tooltip
-                v-if="['unauthorized'].includes(row.status)"
-                :content="$t('device.permission.error')"
-                placement="top"
-              >
-                <el-link type="danger" underline="never" icon="WarningFilled" class="mr-1 flex-none"></el-link>
-              </el-tooltip>
-
-              <span class="flex-none">{{ $t(getDictLabel('deviceStatus', row.status)) || '-' }}</span>
-            </div>
-          </el-tag>
-        </el-table-column>
-
-        <el-table-column
-          v-slot="{ row }"
-          :label="$t('common.actions')"
-          align="left"
-          min-width="150"
-        >
+    <div v-loading="loading && !deviceList.length" :element-loading-text="$t('common.loading')" class="device-cards flex-1 min-h-0 overflow-auto">
+      <div v-if="loadError && !deviceList.length" class="device-load-error">
+        <el-alert :title="loadError" type="warning" :closable="false" />
+        <el-button class="mt-3" @click="handleRefresh">
+          重新加载
+        </el-button>
+      </div>
+      <AppEmpty v-else-if="!loading && !deviceList.length" :sub-title="$t('device.list.empty')" />
+      <article v-for="row in deviceList" :key="row.id" class="device-card">
+        <div class="device-card-identity">
+          <div class="device-card-name">
+            <Remark :device="row" />
+          </div>
+          <div class="device-card-serial">
+            <DevicePopover :key="row.status" :device="row" />
+            <span :title="row.id">{{ row.id }}</span>
+            <i v-if="row.wifi" class="i-bi-wifi flex-none" title="Wi-Fi"></i>
+          </div>
+        </div>
+        <el-tag effect="plain" class="device-card-status" :type="getDictLabel('deviceStatus', row.status, { labelKey: 'tagType' })">
+          <el-tooltip v-if="row.status === 'unauthorized'" :content="$t('device.permission.error')">
+            <el-icon><WarningFilled /></el-icon>
+          </el-tooltip>
+          {{ $t(getDictLabel('deviceStatus', row.status)) || '-' }}
+        </el-tag>
+        <div class="device-card-actions">
           <div class="flex items-center gap-1 !*:ml-0">
-            <el-button v-if="['device', 'unauthorized'].includes(row.status)" type="primary" text circle icon="Monitor" title="桌面模式" class="desktop-launch-action" @click="openFusion(row)" />
+            <el-button v-if="['device', 'unauthorized'].includes(row.status)" type="primary" text circle icon="Iphone" title="桌面模式" class="desktop-launch-action" @click="openFusion(row)" />
             <ConnectAction
               v-if="['offline'].includes(row.status) && row.wifi"
               v-bind="{
@@ -103,14 +35,6 @@
                 handleConnect,
               }"
             />
-
-            <MirrorAction
-              v-if="['device', 'unauthorized'].includes(row.status)"
-              :ref="getMirrorActionRefs"
-              v-bind="{ row, toggleRowExpansion }"
-            />
-
-            <MoreDropdown v-if="['device'].includes(row.status)" v-bind="{ row, toggleRowExpansion }" />
 
             <WirelessAction v-if="['device', 'unauthorized'].includes(row.status)" v-bind="{ row, handleConnect, handleRefresh }" />
 
@@ -122,59 +46,23 @@
               }"
             />
           </div>
-        </el-table-column>
-        <el-table-column type="expand">
-          <template #header>
-            <el-icon class="" :title="$t('device.control.more')">
-              <Operation class="" />
-            </el-icon>
-          </template>
-
-          <template #default="{ row }">
-            <ControlBar :device="row" :swapy-enabled="true" button-class="!min-w-10 !w-4vw !max-w-12" />
-          </template>
-        </el-table-column>
-      </el-table>
-    </div>
-
-    <div class="flex-none flex items-center py-1 overflow-hidden py-2">
-      <div class="flex-none">
-        <WirelessGroup ref="wirelessGroupRef" v-bind="{ handleRefresh }" @auto-connected="onAutoConnected" />
-      </div>
-
-      <div class="flex-1 w-0 gap-2 flex items-center justify-end">
-        <el-button
-          type="default"
-          :icon="loading ? '' : 'Refresh'"
-          :loading="loading"
-          circle
-          :title="$t('device.refresh.name')"
-          @click="handleRefresh"
-        >
-        </el-button>
-      </div>
+        </div>
+      </article>
     </div>
   </div>
 </template>
 
 <script setup>
-import { uniqBy } from 'lodash-es'
 import { sleep } from '$/utils/index.js'
 
 import AppEmpty from '$/components/app-empty/index.vue'
-import BatchActions from './components/batch-actions/index.vue'
-import ControlBar from '$/components/control-bar/index.vue'
-import MirrorAction from './components/mirror-action/index.vue'
-import MoreDropdown from './components/more-dropdown/index.vue'
 import Remark from './components/remark/index.vue'
 import WirelessAction from './components/wireless-action/index.vue'
 import ConnectAction from './components/connect-action/index.vue'
 import RemoveAction from './components/remove-action/index.vue'
-import WirelessGroup from './components/wireless-group/index.vue'
 import DevicePopover from './components/device-popover/index.vue'
 
 import { getDictLabel } from '$/dicts/helper'
-import { deviceStatus } from '$/dicts/index.js'
 
 const deviceStore = useDeviceStore()
 const preferenceStore = usePreferenceStore()
@@ -184,12 +72,7 @@ function openFusion(row) {
 }
 
 const loading = ref(false)
-
-const mirrorActionRefs = ref([])
-const selectedRows = ref([])
-
-const tableRef = ref(null)
-const wirelessGroupRef = ref(null)
+const loadError = ref('')
 
 const deviceList = computed({
   get: () => deviceStore.list,
@@ -197,31 +80,6 @@ const deviceList = computed({
     deviceStore.list = val
   },
 })
-
-const hasSelection = computed(() => selectedRows.value.length > 0)
-
-const statusFilters = computed(() => {
-  return deviceStatus
-    .map(item => ({
-      text: window.t(item.label),
-      value: item.value,
-    }))
-    .filter(item => !['emulator'].includes(item.value))
-})
-
-const remarkFilters = computed(() => {
-  const value = deviceList.value
-    .map(item => ({
-      text: item.remark ?? item.name,
-      value: item.remark ?? item.name,
-    }))
-  return uniqBy(value, 'value')
-})
-
-function remarkFilterMethod(value, row, column) {
-  const target = row.remark || row.name
-  return target === value
-}
 
 const autoFusionDevices = new Set()
 
@@ -233,7 +91,9 @@ async function getDeviceData(options = {}) {
   }
 
   try {
+    loadError.value = ''
     await deviceStore.getList()
+    loading.value = false
     const available = new Set(deviceStore.list.filter(item => item.status === 'device').map(item => item.id))
     for (const id of autoFusionDevices) {
       if (!available.has(id))
@@ -258,28 +118,15 @@ async function getDeviceData(options = {}) {
     const message = error?.message || error?.cause?.message || ''
     console.warn('Device list fetch error:', message)
 
-    if (message.includes('failed to start daemon')) {
-      await getDeviceData()
-      return false
-    }
-
     if (message) {
       ElMessage.warning(message)
     }
 
-    deviceList.value = []
+    loadError.value = message || '设备读取失败，请检查连接后重试'
   }
-
-  loading.value = false
-}
-
-function filterMethod(value, row, column) {
-  const property = column.property
-  return row[property] === value
-}
-
-function onSelectionChange(rows) {
-  selectedRows.value = rows
+  finally {
+    loading.value = false
+  }
 }
 
 async function onAdbWatch(type, ret) {
@@ -287,66 +134,21 @@ async function onAdbWatch(type, ret) {
     await sleep(1000)
     getDeviceData()
   }
-
-  if (type === 'remove') {
-    mirrorActionRefs.value = mirrorActionRefs.value.filter(
-      item => item.row.id !== ret.id,
-    )
-  }
 }
 
-let autoMirrorTimer
-let autoMirrorLock = false
-async function getMirrorActionRefs(ref) {
-  if (!ref?.row?.id) {
-    return false
+async function handleConnect(address) {
+  try {
+    await window.$preload.adb.connect(address)
   }
-
-  if (['unauthorized', 'offline'].includes(ref.row.status)) {
-    return false
-  }
-
-  const exists = mirrorActionRefs.value.some(item => item.row.id === ref.row.id)
-  if (exists) {
-    return false
-  }
-
-  mirrorActionRefs.value.push(ref)
-
-  const autoMirrorFlag = preferenceStore.data.autoMirror
-
-  if (!autoMirrorFlag || autoMirrorLock) {
-    return false
-  }
-
-  autoMirrorLock = true
-
-  if (autoMirrorTimer) {
-    clearTimeout(autoMirrorTimer)
-  }
-  autoMirrorTimer = setTimeout(async () => {
-    for (const item of mirrorActionRefs.value) {
-      await item.handleClick(item.row)
-      await sleep()
-    }
-  }, 1000)
-}
-
-function toggleRowExpansion(...args) {
-  tableRef.value.toggleRowExpansion(...args)
-}
-
-function handleConnect(...args) {
-  wirelessGroupRef.value.connect(...args)
+  catch (error) { ElMessage.warning(error.message) }
+  await handleRefresh()
 }
 
 async function handleRefresh() {
   loading.value = true
   await sleep()
-  getDeviceData({ resetResolve: true, unloading: true })
+  await getDeviceData({ unloading: true })
 }
-
-function onAutoConnected() {}
 
 let unAdbWatch = null
 
@@ -374,16 +176,53 @@ onActivated(() => {
   transform: scale(0.84);
   background-color: #ffffff26;
 }
-:deep() {
-  .el-table {
-    --el-empty-image-width: 24vh;
-    .el-table__row .cell {
-      @apply !py-1;
-    }
-
-    .el-table__expanded-cell {
-      @apply !py-0;
-    }
-  }
+.device-cards {
+  padding: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 280px));
+  align-content: start;
+  justify-content: center;
+  scrollbar-gutter: stable both-edges;
+  gap: 12px;
+}
+.device-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  min-height: 104px;
+  padding: 14px 16px;
+  border: 1px solid var(--ui-border);
+  border-radius: 16px;
+  background: var(--ui-raised);
+  align-items: center;
+}
+.device-card-identity {
+  min-width: 0;
+}
+.device-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ui-text);
+}
+.device-card-serial {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-secondary);
+  font-size: 12px;
+  min-width: 0;
+  margin-top: 8px;
+}
+.device-card-serial > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-card-status {
+  justify-self: end;
+}
+.device-card-actions {
+  grid-column: 1 / -1;
+  justify-self: end;
 }
 </style>

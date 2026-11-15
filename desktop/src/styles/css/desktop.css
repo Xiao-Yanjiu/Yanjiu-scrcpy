@@ -444,3 +444,70 @@ html:root #app {
   background: var(--settings-card) !important;
   border-color: var(--settings-card-border) !important;
 }
+
+/* All main settings and device cards share the same theme and glass tint. */
+.settings-fields .el-form-item,
+.extra-setting-card,
+.device-card {
+  background: var(--settings-card) !important;
+  border-color: var(--settings-card-border) !important;
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.06);
+}
+:root:root:not(.dark) {
+  --ui-text: #000;
+  --ui-secondary: #111;
+  --ui-muted: #222;
+  --el-text-color-primary: #000;
+  --el-text-color-regular: #111;
+  --el-text-color-secondary: #222;
+  --el-text-color-placeholder: #333;
+}
+:root:not(.dark) .main-shell .el-button,
+:root:not(.dark) .main-shell .el-icon,
+:root:not(.dark) .main-shell .theme-toggle,
+:root:not(.dark) .main-shell .el-select__placeholder,
+:root:not(.dark) .main-shell .el-input__inner,
+:root:not(.dark) .main-shell .el-form-item__label {
+  color: #000;
+}
+@media (max-width: 520px) {
+  .main-shell {
+    padding: 8px;
+    gap: 8px;
+  }
+  .main-header-content {
+    gap: 4px;
+  }
+  .main-brand {
+    display: none;
+  }
+  .app-header {
+    gap: 2px;
+  }
+  .app-header .el-segmented__item {
+    padding: 0 9px;
+    min-height: 32px;
+  }
+  .theme-toggle {
+    margin-left: 0 !important;
+  }
+}
+
+@media (max-width: 520px) {
+  .main-shell .app-controls {
+    gap: 0;
+  }
+  .main-shell .app-controls .el-button,
+  .main-shell .theme-toggle,
+  .main-shell .app-header > .flex-none .el-button {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+  }
+  .main-shell .main-brand {
+    display: none;
+  }
+  .main-shell .main-header-content {
+    gap: 0;
+  }
+}

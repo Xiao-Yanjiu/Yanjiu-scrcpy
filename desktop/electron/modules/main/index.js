@@ -53,6 +53,8 @@ export default {
       mainWindow: true,
       browserWindow: {
         persistenceBounds: true,
+        minWidth: 320,
+        minHeight: 360,
         title: 'Yanjiu-scrcpy',
         backgroundColor: '#00000000',
         transparent: true,

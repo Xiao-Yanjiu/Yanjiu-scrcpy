@@ -1,5 +1,6 @@
+import { createNotificationTracker } from './notification-tracker.js'
 import store from '$electron/helpers/store/index.js'
-import { buildResolve } from '$electron/process/resources.js'
+import { extraResolve } from '$electron/process/resources.js'
 import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, Tray } from 'electron'
 import { globalEventEmitter } from '$electron/helpers/emitter/index.js'
 import { writeFileSync } from 'node:fs'
@@ -10,7 +11,7 @@ import { createWindowManager } from '@yanjiu-scrcpy/electron-setup/main'
 import { attachRoundedGlass } from '$electron/helpers/index.js'
 
 function fusionIcon() {
-  const image = nativeImage.createFromPath(buildResolve('fusion-monitor-tray.png'))
+  const image = nativeImage.createFromPath(extraResolve('common/phone-mirror/phone-mirror.ico'))
   return image.isEmpty() ? nativeImage.createFromPath(trayPath) : image
 }
 function fusionKey(payload) {
@@ -47,7 +48,7 @@ function fullscreenControlPage() {
   button.onpointerdown=e=>{if(e.button!==0)return;press={x:e.screenX,y:e.screenY,moved:false};button.setPointerCapture(e.pointerId);button.classList.add('dragging')};
   button.onpointermove=e=>{if(!press)return;if(Math.hypot(e.screenX-press.x,e.screenY-press.y)>5)press.moved=true;if(press.moved)ipcRenderer.send('desktop-fullscreen-control',{action:'move',x:e.screenX,y:e.screenY})};
   button.onpointerup=e=>{if(!press)return;ipcRenderer.send('desktop-fullscreen-control',{action:press.moved?'save':'exit'});press=null;button.classList.remove('dragging');if(button.hasPointerCapture(e.pointerId))button.releasePointerCapture(e.pointerId)};
-  button.onpointercancel=()=>{press=null;button.classList.remove('dragging')};
+  button.onpointercancel=()=>{if(press?.moved)ipcRenderer.send('desktop-fullscreen-control',{action:'save'});press=null;button.classList.remove('dragging')};
   button.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();ipcRenderer.send('desktop-fullscreen-control',{action:'exit'})}};
   ipcRenderer.on('fullscreen-position',(_,left)=>document.body.classList.toggle('left',left));</script>`
 }
@@ -113,39 +114,224 @@ function attachFullscreenControl(host) {
   })
 }
 
+const nextDesktopNotification = createNotificationTracker()
+const notificationCards = []
+const notificationQueue = []
+let notificationLoading
+let notificationPumping = false
+let notificationGeneration = 0
+let notificationAnimation
+let notificationArea
+
+function layoutNotificationCards() {
+  clearInterval(notificationAnimation)
+  if (!notificationCards.length)
+    return
+  const area = notificationArea
+  const started = Date.now()
+  const positions = notificationCards.map((entry, index) => ({
+    entry,
+    from: entry.win.getBounds().y,
+    to: area.y + area.height - 12 - 116 - (notificationCards.length - 1 - index) * 124,
+  }))
+  notificationAnimation = setInterval(() => {
+    const progress = Math.min(1, (Date.now() - started) / 200)
+    const eased = 1 - (1 - progress) ** 3
+    for (const { entry, from, to } of positions) {
+      if (!entry.win.isDestroyed())
+        entry.win.setPosition(entry.win.getBounds().x, Math.round(from + (to - from) * eased))
+    }
+    if (progress === 1)
+      clearInterval(notificationAnimation)
+  }, 16)
+}
+function removeNotificationCard(entry) {
+  const index = notificationCards.indexOf(entry)
+  if (index < 0)
+    return
+  notificationCards.splice(index, 1)
+  clearTimeout(entry.timer)
+  if (!entry.win.isDestroyed())
+    entry.win.destroy()
+  layoutNotificationCards()
+  pumpNotificationCards().catch(error => console.warn('Notification stack:', error.message))
+}
+function dismissDesktopNotification() {
+  notificationGeneration++
+  clearInterval(notificationAnimation)
+  notificationQueue.length = 0
+  notificationLoading?.destroy()
+  notificationLoading = null
+  for (const entry of notificationCards.splice(0)) {
+    clearTimeout(entry.timer)
+    if (!entry.win.isDestroyed())
+      entry.win.destroy()
+  }
+  notificationArea = null
+}
+async function pumpNotificationCards() {
+  if (notificationPumping || app.bossHidden)
+    return
+  notificationPumping = true
+  const generation = notificationGeneration
+  try {
+    while (notificationQueue.length) {
+      if (generation !== notificationGeneration || app.bossHidden)
+        break
+      notificationArea ||= screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea
+      const capacity = Math.max(1, Math.floor((notificationArea.height - 24) / 124))
+      if (notificationCards.length >= capacity)
+        break
+      const { owner, notice } = notificationQueue.shift()
+      if (owner.isDestroyed())
+        continue
+      const area = notificationArea
+      const width = Math.min(350, area.width - 24)
+      const win = notificationLoading = new BrowserWindow({
+        x: area.x + area.width - width - 12, y: area.y + area.height - 128,
+        width, height: 116, frame: false, transparent: true, backgroundColor: '#00000000',
+        hasShadow: false, skipTaskbar: true, alwaysOnTop: true, focusable: false,
+        resizable: false, show: false,
+      })
+      const entry = { win, timer: null }
+      win.keepTaskbarHidden = true
+      win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      win.webContents.on('will-navigate', (event, url) => {
+        event.preventDefault()
+        if (url !== 'yanjiu-notification:open' || !notificationCards.includes(entry) || app.bossHidden)
+          return
+        removeNotificationCard(entry)
+        if (!owner.isDestroyed())
+          owner.webContents.send('desktop-open-notification', notice)
+      })
+      const escape = value => String(value || '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;',
+      })[char])
+      const appName = notice.appName || notice.packageName || 'Android'
+      const icon = /^data:image\/png;base64,[\w+/=]+$/.test(notice.icon || '')
+        ? `<img src="${notice.icon}" alt="">`
+        : `<span>${escape(Array.from(appName)[0])}</span>`
+      const html = `<!doctype html><meta charset="utf-8"><style>
+    @keyframes arrive{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+    @media(prefers-reduced-motion:reduce){article{animation:none!important}}
+    *{box-sizing:border-box}body{margin:0;font:14px system-ui;color:#fff}
+    article{animation:arrive .2s ease-out;cursor:pointer;height:116px;display:flex;gap:12px;padding:14px;background:#282828f5;border:1px solid #666;border-radius:16px;overflow:hidden}
+    img,span{width:38px;height:38px;flex:none;border-radius:9px;object-fit:contain}
+    span{display:grid;place-items:center;background:#555}section{min-width:0}
+    small,b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    p{margin:3px 0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    </style><a href="yanjiu-notification:open" style="color:inherit;text-decoration:none;display:block"><article>${icon}<section><small>${escape(appName)}</small><b>${escape(notice.title)}</b><p>${escape(notice.text)}</p></section></article></a>`
+      try {
+        await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+        if (generation !== notificationGeneration || win.isDestroyed() || owner.isDestroyed() || app.bossHidden) {
+          if (!win.isDestroyed())
+            win.destroy()
+          continue
+        }
+        notificationCards.push(entry)
+        layoutNotificationCards()
+        win.showInactive()
+        entry.timer = setTimeout(() => removeNotificationCard(entry), 5000)
+      }
+      catch (error) {
+        console.warn('Notification card failed:', error.message)
+        if (!win.isDestroyed())
+          win.destroy()
+      }
+      finally {
+        if (notificationLoading === win)
+          notificationLoading = null
+      }
+    }
+  }
+  finally {
+    notificationPumping = false
+    if (notificationQueue.length && generation !== notificationGeneration && !app.bossHidden)
+      queueMicrotask(() => pumpNotificationCards().catch(error => console.warn('Notification stack:', error.message)))
+    if (!notificationCards.length && !notificationQueue.length)
+      notificationArea = null
+  }
+}
+async function showDesktopNotification({ owner, notices, posted, background }) {
+  if (!background)
+    return
+  const deviceId = owner.fusionDeviceId || ''
+  const identity = store.get('androidDesktopIdentities')?.[deviceId] || deviceId
+  const changed = nextDesktopNotification(identity, notices, posted)
+  console.info('Notification delivery', { received: notices.length, posted: Boolean(posted), changed: changed.length, hidden: Boolean(app.bossHidden) })
+  if (app.bossHidden)
+    return
+  for (const notice of changed) notificationQueue.push({ owner, notice })
+  await pumpNotificationCards()
+}
+
 const floatingTargets = new Set()
+
+function placeFloatingTarget(target, desiredY, animate = false, resolvedY) {
+  const area = screen.getDisplayNearestPoint(target.position).workArea
+  const gap = 68
+  const x = area.x + area.width - 80
+  const occupied = [...floatingTargets].filter(item => item !== target && !item.closed
+    && screen.getDisplayNearestPoint(item.position).id === screen.getDisplayNearestPoint(target.position).id)
+  const clampY = y => Math.max(area.y, Math.min(y, area.y + area.height - 80))
+  const candidates = [clampY(desiredY), area.y, area.y + area.height - 80]
+  for (const item of occupied) {
+    candidates.push(clampY(item.position.y - gap), clampY(item.position.y + gap))
+  }
+  candidates.sort((a, b) => Math.abs(a - desiredY) - Math.abs(b - desiredY))
+  const y = resolvedY ?? candidates.find(value => occupied.every(item => Math.abs(item.position.y - value) >= gap))
+  const destination = y === undefined ? null : { x, y }
+  if (!destination)
+    return
+  clearInterval(target.positionAnimation)
+  target.position = destination
+  if (!target.bubble || target.bubble.isDestroyed())
+    return
+  const from = target.bubble.getBounds()
+  const started = Date.now()
+  const move = () => {
+    if (target.bubble.isDestroyed()) {
+      clearInterval(target.positionAnimation)
+      return
+    }
+    const progress = animate ? Math.min(1, (Date.now() - started) / 220) : 1
+    const eased = 1 - (1 - progress) ** 3
+    target.bubble.setPosition(Math.round(from.x + (destination.x - from.x) * eased), Math.round(from.y + (destination.y - from.y) * eased))
+    if (progress === 1)
+      clearInterval(target.positionAnimation)
+  }
+  target.positionAnimation = setInterval(move, 16)
+  move()
+}
+
 // Local, generated UI only: notification text is assigned through textContent.
 function floatingPage(icon, name) {
   const data = JSON.stringify({ icon, name }).replaceAll('<', '\\u003c')
   return `<!doctype html><meta charset="utf-8"><style>
   *{box-sizing:border-box}body{margin:0;background:transparent;font:14px system-ui;color:white;overflow:hidden}
-  #notice{position:absolute;right:86px;bottom:8px;width:250px;padding:14px;border:1px solid #7776;border-radius:20px;background:#292929ed;display:none;cursor:pointer;animation:in .22s ease-out}#text{opacity:.8;margin-top:5px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
-  button{position:absolute;right:8px;bottom:8px;width:64px;height:64px;padding:0;border-radius:18px;border:0;background:transparent;box-shadow:none;color:white;cursor:pointer;transition:transform .15s}button:active{transform:scale(.9)}img{width:64px;height:64px;object-fit:contain;pointer-events:none}#badge{position:absolute;right:-3px;top:-3px;background:#ddd;color:#222;border-radius:12px;padding:1px 5px;font-size:11px;display:none}body.light{color:#181818}body.light #notice{background:#efefeff2;border-color:#fff}body.light button{background:transparent;border:0;color:#181818}@keyframes in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}</style>
+  button{position:absolute;width:64px;height:64px;padding:0;border:0;background:transparent;cursor:pointer}
+  img{width:64px;height:64px;object-fit:contain;pointer-events:none}</style>
   <style>button{right:0;bottom:8px;transform:translateX(32px);transition:transform .24s cubic-bezier(.2,.8,.2,1)}#hover-zone{position:absolute;right:0;bottom:0;width:80px;height:80px}#hover-zone:hover button,button:focus,button.dragging{transform:translateX(0)}button:active{transform:translateX(0) scale(.94);transform-origin:right center}</style>
-  <div id="notice"><b id="title"></b><div id="text"></div></div><div id="hover-zone"><button id="button"><img id="icon"><span id="badge"></span></button></div>
-  <script>const {ipcRenderer}=require('electron');const data=${data};const button=document.getElementById('button');const icon=document.getElementById('icon');icon.src=data.icon;icon.alt=data.name;button.title=data.name;let press,drag=false,timer,count=0;
-  button.onpointerdown=e=>{if(e.button!==0)return;press={x:e.screenX,y:e.screenY};drag=false;button.classList.add('dragging');button.setPointerCapture(e.pointerId)};
+  <div id="hover-zone"><button id="button"><img id="icon"></button></div>
+  <script>const {ipcRenderer}=require('electron');const data=${data};const button=document.getElementById('button');const icon=document.getElementById('icon');icon.src=data.icon;icon.alt=data.name;button.title=data.name;let press,drag=false;
+  button.onpointerdown=e=>{if(e.button!==0)return;press={x:e.screenX,y:e.screenY};drag=false;button.classList.add('dragging');ipcRenderer.send('fusion-float-action',{action:'drag-start'});button.setPointerCapture(e.pointerId)};
   button.onpointermove=e=>{if(!press)return;const dx=e.screenX-press.x,dy=e.screenY-press.y;if(Math.abs(dx)+Math.abs(dy)>4)drag=true;if(drag){ipcRenderer.send('fusion-float-action',{action:'move',dx,dy});press={x:e.screenX,y:e.screenY}}};
-  button.onpointerup=()=>{if(press&&!drag)ipcRenderer.send('fusion-float-action',{action:'restore'});press=null;button.classList.remove('dragging');button.blur()};button.onpointercancel=()=>{press=null;button.classList.remove('dragging')};
-  document.getElementById('notice').onclick=()=>ipcRenderer.send('fusion-float-action',{action:'restore'});
-  ipcRenderer.on('float-state',(_,state)=>{document.body.classList.toggle('light',state.light);button.style.display=state.minimized?'block':'none';if(state.hideNotice)document.getElementById('notice').style.display='none';if(state.notice){count++;const badge=document.getElementById('badge');badge.textContent=count>99?'99+':count;badge.style.display='block';document.getElementById('title').textContent=state.notice.title||data.name;document.getElementById('text').textContent=state.notice.text||'';document.getElementById('notice').style.display='block';clearTimeout(timer);timer=setTimeout(()=>{document.getElementById('notice').style.display='none';ipcRenderer.send('fusion-float-action',{action:'expired'})},5000)}else if(state.clear){count=0;document.getElementById('badge').style.display='none';document.getElementById('notice').style.display='none'}});
+  button.onpointerup=()=>{if(press)ipcRenderer.send('fusion-float-action',{action:drag?'drop':'restore'});press=null;button.classList.remove('dragging');button.blur()};button.onpointercancel=()=>{if(press)ipcRenderer.send('fusion-float-action',{action:'drop'});press=null;button.classList.remove('dragging')};
   </script>`
 }
-export function registerFloatingTarget({ deviceId, packageName, name, icon, restore, isMinimized, close, nativeFocus = false }) {
-  const target = { deviceId, packageName, restore, isMinimized, close, nativeFocus, minimized: false, bubble: null, noticeUntil: 0 }
+export function registerFloatingTarget({ name, icon, restore, isMinimized, nativeFocus = false }) {
+  const target = { restore, nativeFocus, minimized: false, bubble: null }
   floatingTargets.add(target)
   const area = screen.getPrimaryDisplay().workArea
-  const rank = floatingTargets.size - 1
-  target.position = { x: area.x + area.width - 80, y: area.y + Math.max(0, Math.min(area.height - 80, 100 + rank * 84)) }
-  target.update = async (notice, clear = false) => {
+  target.position = { x: area.x + area.width - 80, y: area.y + area.height - 80 }
+  placeFloatingTarget(target, target.position.y)
+  target.update = async () => {
     if (target.closed || app.bossHidden)
       return
     target.minimized = await isMinimized()
     if (target.closed || app.bossHidden)
       return
-    if (notice)
-      target.noticeUntil = Date.now() + 5200
-    if (!target.minimized && Date.now() >= target.noticeUntil) {
+    if (!target.minimized) {
       target.bubble?.hide()
       return
     }
@@ -162,40 +348,17 @@ export function registerFloatingTarget({ deviceId, packageName, name, icon, rest
     await target.loading
     if (target.closed || app.bossHidden)
       return
-    const hasNotice = Date.now() < target.noticeUntil
-    const width = hasNotice ? 340 : 80
-    const height = hasNotice ? 160 : 80
-    const bounds = target.bubble.getBounds()
-    const nextBounds = { x: target.position.x - (width - 80), y: target.position.y - (height - 80), width, height }
-    if (Object.keys(nextBounds).some(key => bounds[key] !== nextBounds[key]))
-      target.bubble.setBounds(nextBounds)
-    const shapeKey = `${width}:${height}:${target.minimized}:${hasNotice}`
-    if (['win32', 'linux'].includes(process.platform) && shapeKey !== target.shapeKey) {
-      target.shapeKey = shapeKey
-      const shape = []
-      const rounded = (x, y, width, height, radius) => {
-        for (let row = 0; row < height; row++) {
-          const distance = row < radius ? radius - row - 0.5 : row >= height - radius ? row - (height - radius) + 0.5 : 0
-          const inset = distance ? Math.ceil(radius - Math.sqrt(radius * radius - distance * distance)) : 0
-          shape.push({ x: x + inset, y: y + row, width: width - inset * 2, height: 1 })
-        }
-      }
-      if (target.minimized)
-        shape.push({ x: width - 80, y: height - 80, width: 80, height: 80 })
-      if (hasNotice)
-        rounded(4, 8, 250, 144, 20)
-      target.bubble.setShape(shape)
-    }
-    target.bubble.webContents.send('float-state', { minimized: target.minimized, notice, clear, hideNotice: Date.now() >= target.noticeUntil, light: store.get('common.theme') === 'light' || (store.get('common.theme') === 'system' && !store.get('common.isDark')) })
     // Reassert the topmost order without taking keyboard focus. A native mirror
     // or another topmost application can otherwise cover an existing bubble.
     target.bubble.setAlwaysOnTop(true, 'screen-saver')
     if (!target.bubble.isVisible())
       target.bubble.showInactive()
-    target.bubble.moveTop()
+    if (![...floatingTargets].some(item => item !== target && item.dragging))
+      target.bubble.moveTop()
   }
   target.dispose = () => {
     target.closed = true
+    clearInterval(target.positionAnimation)
     floatingTargets.delete(target)
     target.bubble?.destroy()
   }
@@ -269,9 +432,9 @@ export default {
       if (!target || app.bossHidden)
         return
       if (request.action === 'restore') {
-        target.noticeUntil = 0
         if (target.restoring)
           return
+        target.dragging = false
         target.restoring = true
         // Only a user click may give this tool window foreground rights for the
         // native mirror handoff. Notifications/hover never activate the bubble.
@@ -279,37 +442,50 @@ export default {
           target.bubble.setFocusable(true)
           target.bubble.focus()
         }
-        Promise.resolve().then(() => target.restore()).then(() => target.update(null, true)).catch(() => {}).finally(() => {
+        Promise.resolve().then(() => target.restore()).then(() => target.update()).catch(() => {}).finally(() => {
           target.restoring = false
           if (target.nativeFocus && target.bubble && !target.bubble.isDestroyed())
             target.bubble.setFocusable(false)
         })
       }
-      else if (request.action === 'expired') {
-        target.noticeUntil = 0
-        target.update().catch(() => {})
+      else if (request.action === 'drag-start') {
+        target.dragging = true
+        clearInterval(target.positionAnimation)
+        const bounds = target.bubble.getBounds()
+        target.position = { x: bounds.x, y: bounds.y }
+        target.bubble.moveTop()
+      }
+      else if (request.action === 'drop') {
+        target.dragging = false
+        const display = screen.getDisplayNearestPoint(target.position)
+        const area = display.workArea
+        const group = [...floatingTargets].filter(item => !item.closed && item.minimized
+          && screen.getDisplayNearestPoint(item.position).id === display.id).sort((a, b) => a.position.y - b.position.y)
+        const spacing = Math.min(68, (area.height - 80) / Math.max(1, group.length - 1))
+        const positions = group.map(item => item.position.y)
+        for (let index = 0; index < positions.length; index++) {
+          positions[index] = Math.max(positions[index], index ? positions[index - 1] + spacing : area.y)
+        }
+        for (let index = positions.length - 1; index >= 0; index--) {
+          positions[index] = Math.min(positions[index], index < positions.length - 1 ? positions[index + 1] - spacing : area.y + area.height - 80)
+        }
+        group.forEach((item, index) => placeFloatingTarget(item, positions[index], true, positions[index]))
       }
       else if (request.action === 'move' && Number.isFinite(request.dx) && Number.isFinite(request.dy)) {
         const bounds = target.bubble.getBounds()
         const area = screen.getDisplayMatching(bounds).workArea
-        target.position = { x: area.x + area.width - 80, y: Math.round(Math.max(area.y, Math.min(target.position.y + request.dy, area.y + area.height - 80))) }
-        target.bubble.setPosition(target.position.x - (bounds.width - 80), target.position.y - (bounds.height - 80))
+        target.position = { x: area.x + area.width - 80, y: Math.round(Math.max(area.y, Math.min(bounds.y + request.dy, area.y + area.height - 80))) }
+        clearInterval(target.positionAnimation)
+        target.bubble.setPosition(target.position.x, target.position.y)
+        target.bubble.moveTop()
       }
     })
-    globalEventEmitter.on('desktop:notification-snapshot', ({ deviceId, notices }) => {
-      for (const target of floatingTargets) {
-        if (target.deviceId !== deviceId)
-          continue
-        const previous = target.notices
-        target.notices = new Map(notices.map(item => [item.key, `${item.title}\n${item.text}`]))
-        if (!previous)
-          continue
-        const changed = notices.filter(item => (!target.packageName || item.packageName === target.packageName) && previous.get(item.key) !== target.notices.get(item.key))
-        if (changed.length)
-          target.update(changed.at(-1)).catch(() => {})
-      }
+    globalEventEmitter.on('desktop:notification-snapshot', (snapshot) => {
+      showDesktopNotification(snapshot).catch(error => console.warn('Desktop notification:', error.message))
     })
     globalEventEmitter.on('boss:visibility', (hidden) => {
+      if (hidden)
+        dismissDesktopNotification()
       if (!hidden) {
         for (const target of floatingTargets) target.update().catch(() => {})
       }
@@ -430,7 +606,7 @@ export default {
           else {
             win.keepTaskbarHidden = false
             win.setSkipTaskbar(false)
-            const floating = registerFloatingTarget({ deviceId: payload.device?.id, packageName: payload.fusionApp?.packageName, name: payload.fusionApp?.name || 'Android 应用', icon: payload.fusionApp?.icon, isMinimized: () => !win.isVisible() || win.isMinimized(), restore: async () => {
+            const floating = registerFloatingTarget({ name: payload.fusionApp?.name || 'Android 应用', icon: payload.fusionApp?.icon, isMinimized: () => !win.isVisible() || win.isMinimized(), restore: async () => {
               win.fusionMinimized = false
               await animateWindow(win, true, floating)
             } })
@@ -447,8 +623,7 @@ export default {
               }
             })
             win.on('show', () => {
-              floating.noticeUntil = 0
-              floating.update(null, true).catch(() => {})
+              floating.update().catch(() => {})
             })
             win.once('closed', () => floating.dispose())
             if (process.platform === 'win32') {

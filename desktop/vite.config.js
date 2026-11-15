@@ -1,6 +1,6 @@
 import { defineConfig, mergeConfig } from 'vite'
 
-import { appendFileSync, mkdirSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import useVueRouter from 'vue-router/vite'
@@ -14,6 +14,13 @@ import { notBundle } from 'vite-plugin-electron/plugin'
 import useInternalPlugins from './src/plugins/internal.js'
 
 import postcssConfig from './postcss.config.js'
+
+// Launch a package directory so Electron uses the source version and app identity.
+async function startSourceElectron(args, outputDir) {
+  const { name, version } = JSON.parse(readFileSync(resolve('package.json'), 'utf8'))
+  writeFileSync(resolve(outputDir, 'package.json'), JSON.stringify({ name, version, type: 'module', main: 'main.js' }))
+  await args.startup([resolve(outputDir)])
+}
 
 const alias = {
   // Direct source startup must not consume stale workspace dist files.
@@ -128,7 +135,7 @@ export default defineConfig((args) => {
               plugins: [notBundle()],
             }, args),
             async onstart(args) {
-              await args.startup([resolve(electronOutDir, 'main.js')])
+              await startSourceElectron(args, electronOutDir)
               // Capture native/fatal exits from the parent, even when Electron
               // cannot flush its own log. The plugin exits Node immediately.
               process.electronApp?.prependOnceListener('exit', (code, signal) => {
@@ -152,7 +159,7 @@ export default defineConfig((args) => {
               if (process.electronApp)
                 args.reload()
               else
-                await args.startup([resolve(electronOutDir, 'main.js')])
+                await startSourceElectron(args, electronOutDir)
             },
           },
           renderer: {},

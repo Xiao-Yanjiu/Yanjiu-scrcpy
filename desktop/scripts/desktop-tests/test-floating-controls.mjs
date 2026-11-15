@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import vm from 'node:vm'
+import { createNotificationTracker } from '../../electron/modules/desktop/notification-tracker.js'
 
 const source = fs.readFileSync(new URL('../../electron/modules/desktop/window.js', import.meta.url), 'utf8')
 let id = 0
@@ -37,9 +38,9 @@ const emitter = new EventEmitter()
 const store = new Map()
 const app = {}
 const context = vm.createContext({
-  BrowserWindow: Window, globalEventEmitter: emitter, app,
+  BrowserWindow: Window, globalEventEmitter: emitter, app, createNotificationTracker,
   store: { get: key => store.get(key), set: (key, value) => store.set(key, value) },
-  screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1200, height: 900 } }), getDisplayMatching: () => ({ bounds: { x: 0, y: 0, width: 1200, height: 900 } }) },
+  screen: { getDisplayNearestPoint: () => ({ id: 1, workArea: { x: 0, y: 0, width: 1200, height: 900 } }), getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1200, height: 900 } }), getDisplayMatching: () => ({ bounds: { x: 0, y: 0, width: 1200, height: 900 } }) },
   setInterval: () => 1, clearInterval() {},
   process: { platform: 'win32' }, nativeImage: {}, trayPath: '', console,
 })

@@ -6,9 +6,6 @@
       placeholder="点击后按组合键，Backspace 清除"
       @keydown.prevent.stop="capture"
     />
-    <div class="text-xs opacity-60 mt-1">
-      按一次隐藏本软件全部窗口，再按一次恢复；后台连接继续运行。
-    </div>
     <div v-if="error" class="text-red-500 text-xs">
       {{ error }}
     </div>

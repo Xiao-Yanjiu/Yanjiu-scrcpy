@@ -62,13 +62,47 @@ export const useDeviceStore = defineStore('app-device', () => {
     return value
   }
 
-  async function getList() {
-    const historyDevices = getHistoryDevices()
-    const currentDevices = await getCurrentDevices()
-    const mergedDevices = mergeDevices(historyDevices, currentDevices)
-    saveDevicesToStore(mergedDevices)
-    list.value = mergedDevices
-    return mergedDevices
+  const removedDevicesKey = 'removedDeviceIds'
+
+  function remove(...devices) {
+    const ids = new Set(devices.map(device => device.id ?? device))
+    const stored = { ...($electronStore.get('device') || {}) }
+    for (const id of ids) {
+      delete stored[id]
+    }
+    const removedDeviceIds = new Set($electronStore.get(removedDevicesKey) || [])
+    for (const id of ids) {
+      removedDeviceIds.add(id)
+    }
+    $electronStore.set(removedDevicesKey, [...removedDeviceIds])
+    $electronStore.set('device', stored)
+    list.value = list.value.filter(device => !ids.has(device.id))
+    config.value = stored
+  }
+
+  let listPending
+  function getList() {
+    listPending ||= (async () => {
+      const currentDevices = await getCurrentDevices()
+      const removedDeviceIds = new Set($electronStore.get(removedDevicesKey) || [])
+      const removedDeviceCount = removedDeviceIds.size
+      for (const device of currentDevices) {
+        if (device.status === 'device' || device.status === 'unauthorized') {
+          removedDeviceIds.delete(device.id)
+        }
+      }
+      // Read history after the await so an in-flight scan cannot undo deletion.
+      const historyDevices = getHistoryDevices()
+      const mergedDevices = mergeDevices(historyDevices, currentDevices)
+        .filter(device => !removedDeviceIds.has(device.id))
+      saveDevicesToStore(mergedDevices)
+      if (removedDeviceIds.size !== removedDeviceCount) {
+        $electronStore.set(removedDevicesKey, [...removedDeviceIds])
+      }
+      list.value = mergedDevices
+      return mergedDevices
+    })().finally(() => { listPending = null })
+    return listPending
   }
 
   function setRemark(deviceId, value) {
@@ -82,6 +116,7 @@ export const useDeviceStore = defineStore('app-device', () => {
     init,
     getLabel,
     getList,
+    remove,
     setRemark,
   }
 })

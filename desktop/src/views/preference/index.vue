@@ -1,27 +1,5 @@
 <template>
   <div class="settings-page h-full flex flex-col overflow-hidden">
-    <div
-      class="settings-toolbar flex items-center justify-between flex-none"
-    >
-      <div class="flex-none">
-        <ScopeSelect
-          v-model="deviceScope"
-          @change="onScopeChange"
-          @device-change="onDeviceChange"
-        />
-      </div>
-      <el-button-group class="flex-none">
-        <el-button :title="$t('common.import')" icon="Upload" plain @click="handleImport">
-        </el-button>
-        <el-button :title="$t('common.export')" icon="Download" plain @click="handleExport">
-        </el-button>
-        <el-button :title="$t('preferences.config.edit.name')" icon="Edit" plain @click="handleEdit">
-        </el-button>
-        <el-button :title="$t('preferences.config.reset.name')" icon="RefreshRight" plain @click="handleReset">
-        </el-button>
-      </el-button-group>
-    </div>
-
     <div class="flex-1 min-h-0">
       <PreferenceForm
         v-model="preferenceData"
@@ -29,6 +7,13 @@
           deviceScope,
         }"
       >
+        <template #cards>
+          <article class="extra-setting-card">
+            <h2>无线桌面连接</h2>
+            <WirelessGroup :handle-refresh="refreshDevices" />
+          </article>
+          <NotificationCompanion />
+        </template>
       </PreferenceForm>
     </div>
   </div>
@@ -37,13 +22,17 @@
 <script setup>
 import { debounce } from 'lodash-es'
 
-import PreferenceForm from '$/components/preference-form/index.vue'
-import ScopeSelect from './components/scope-select/index.vue'
+import WirelessGroup from '../device/components/wireless-group/index.vue'
+import NotificationCompanion from './components/notification-companion.vue'
 
+import PreferenceForm from '$/components/preference-form/index.vue'
+
+const deviceStore = useDeviceStore()
+async function refreshDevices() {
+  await deviceStore.getList()
+}
 const preferenceStore = usePreferenceStore()
 const themeStore = useThemeStore()
-
-const configFile = useConfigFile()
 
 const preferenceData = computed({
   get() {
@@ -54,56 +43,9 @@ const preferenceData = computed({
   },
 })
 
-const deviceScope = computed({
-  get() {
-    return preferenceStore.deviceScope
-  },
-  set(value) {
-    preferenceStore.setScope(value)
-  },
-})
-
-function onDeviceChange(options) {
-  const hasCurrentScope = options.some(item => item.value === deviceScope.value)
-
-  if (hasCurrentScope)
-    return false
-
-  deviceScope.value = 'global'
-}
-
-async function handleReset() {
-  try {
-    await ElMessageBox.confirm(window.t('preferences.config.reset.tips'), window.t('common.tips'), {
-      type: 'warning',
-    })
-  }
-  catch (error) {
-    return false
-  }
-
-  preferenceStore.reset(deviceScope.value)
-}
-
-function onScopeChange(value) {
-  deviceScope.value = value
-}
-
-async function handleImport() {
-  configFile.importConfig({
-    onSuccess: () => {
-      preferenceStore.init()
-    },
-  })
-}
-
-function handleEdit() {
-  configFile.editConfig()
-}
-
-async function handleExport() {
-  configFile.exportConfig()
-}
+// This page edits the shared configuration only.
+preferenceStore.setScope('global')
+const deviceScope = 'global'
 
 const handleSave = debounce(_handleSave, 500)
 
@@ -124,18 +66,21 @@ function _handleSave() {
 }
 </script>
 
-<style scoped>
-.settings-toolbar {
-  gap: 16px;
-  padding: 4px 4px 16px;
-  overflow: visible;
+<style>
+.extra-setting-card {
+  border: 1px solid var(--ui-border);
+  border-radius: 16px;
+  background: var(--ui-raised);
+  padding: 10px 12px;
+  min-width: 0;
 }
-.settings-toolbar :deep(.el-button-group) {
-  display: flex;
-  gap: 8px;
+.extra-setting-card h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  line-height: 20px;
 }
-.settings-toolbar :deep(.el-button-group .el-button) {
-  border-radius: 13px !important;
-  margin: 0;
+.extra-setting-card .w-72 {
+  width: 100%;
 }
 </style>

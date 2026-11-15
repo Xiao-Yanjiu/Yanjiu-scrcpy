@@ -1,6 +1,9 @@
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { createDeviceLister } from './helpers/device-list.js'
 import fs from 'node:fs'
 import path from 'node:path'
-import { desktopPath, yadbPath } from '$electron/configs/index.js'
+import { desktopPath, getAdb, yadbPath } from '$electron/configs/index.js'
 import electronStore from '$electron/helpers/store/index.js'
 import { Adb } from '@devicefarmer/adbkit'
 import { createAdbx } from '@yanjiu-scrcpy/adbx'
@@ -464,36 +467,12 @@ async function getScreenSize(id) {
   return null
 }
 
-async function getDeviceList() {
-  const listDevicesWithPaths = await client.listDevicesWithPaths()
-  const devices = listDevicesWithPaths.filter(
-    item => !['offline'].includes(item.type),
-  )
-
-  const concurrencyLimit = Number(
-    electronStore.get('common.concurrencyLimit') ?? 10,
-  )
-  const limit = pLimit(concurrencyLimit)
-
-  const value = await Promise.all(
-    devices.map(item =>
-      limit(async () => {
-        const [serialNo, screenSize] = await Promise.all([
-          getSerialNo(item.id),
-          getScreenSize(item.id),
-        ])
-        return {
-          ...item,
-          serialNo,
-          screenWidth: screenSize?.width ?? null,
-          screenHeight: screenSize?.height ?? null,
-        }
-      }),
-    ),
-  )
-
-  return value
-}
+const execFileAsync = promisify(execFile)
+const getDeviceList = createDeviceLister((args, timeout) => execFileAsync(getAdb(), args, {
+  timeout,
+  windowsHide: true,
+  maxBuffer: 1024 * 1024,
+}))
 
 function init() {
   // Setup the PATH environment variable by injecting necessary tool paths

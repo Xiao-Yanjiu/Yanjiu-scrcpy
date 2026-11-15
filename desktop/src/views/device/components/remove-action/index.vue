@@ -17,8 +17,7 @@
 </template>
 
 <script setup>
-import { findTargetDevices, removeDevices, ScrcpyConfigMigrator } from '$/utils/device/index.js'
-import { sleep } from '$/utils'
+import { findTargetDevices, ScrcpyConfigMigrator } from '$/utils/device/index.js'
 import ConfigMigrationDialog from './components/config-migration-dialog/index.vue'
 
 const props = defineProps({
@@ -100,13 +99,11 @@ async function handleClick(device = props.device) {
 }
 
 async function handleRemove(device) {
-  await removeDevices(device)
+  deviceStore.remove(device)
 
   migrator.processedDeviceIds.add(device.id)
   migrator.cleanupProcessedConfigs()
 
-  props.handleRefresh()
-  await sleep()
   loading.value = false
 }
 </script>

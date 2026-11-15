@@ -7,7 +7,7 @@
       show-edit-button
       select-all-on-focus
       allow-empty
-      actions-class="group-hover:inline-flex hidden"
+      actions-class="remark-actions"
       @confirm="onConfirm"
     />
   </div>
@@ -39,4 +39,31 @@ function onConfirm(value) {
 }
 </script>
 
-<style></style>
+<style scoped>
+.group {
+  min-width: 0;
+  height: 28px;
+  gap: 4px;
+}
+:deep(.remark-actions) {
+  display: inline-flex;
+  visibility: hidden;
+  align-items: center;
+}
+.group:hover :deep(.remark-actions),
+.group:focus-within :deep(.remark-actions) {
+  visibility: visible;
+}
+:deep(.el-button) {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+}
+:deep([contenteditable]) {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+</style>

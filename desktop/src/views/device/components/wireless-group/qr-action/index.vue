@@ -17,7 +17,7 @@
         <template v-if="!loading" #icon>
           <i class="i-bi-hr"></i>
         </template>
-        {{ loading ? loadingText : $t('device.wireless.connect.qr') }}
+        {{ loading ? loadingText : '扫码' }}
       </el-button>
     </template>
 

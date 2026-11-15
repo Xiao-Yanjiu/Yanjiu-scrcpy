@@ -228,6 +228,12 @@
           {{ connected ? "没有匹配的应用" : "连接手机后显示应用" }}
         </div>
         <footer class="menu-footer">
+          <div v-if="isFusionLauncher" class="notification-link-status">
+            <span>{{ notificationPushActive ? '通知助手已连接' : '通知助手未连接 · 4秒检查' }}</span>
+            <button v-if="!notificationPushActive" :disabled="!connected || notificationSetupBusy" @click="refreshNotificationCompanion">
+              {{ notificationSetupBusy ? '刷新中…' : '刷新' }}
+            </button>
+          </div>
           <span><span class="connection-dot" :class="{ online: connected }"></span>{{ device?.name || "Android" }}</span><button
             class="icon-button"
             :title="isFusionLauncher ? '退出桌面模式' : '控制中心'"
@@ -857,6 +863,7 @@ let notificationSeeded = false
 let notificationPolling = false
 let knownNotifications = new Map()
 let notificationPollTimer = 0
+const notificationPushActive = ref(false)
 const draggingTask = ref('')
 let lastTaskDrop = 0
 const captionId = ref('')
@@ -1738,11 +1745,24 @@ async function dismissNotification(notice) {
     notificationBusy.value = ''
   }
 }
+function openDesktopNotification(_event, notice) {
+  openNotification(notice)
+}
 async function openNotification(notice) {
   if (notificationBusy.value)
     return
   notificationBusy.value = notice.key
   try {
+    // Desktop cards open the app directly: never expand/click the phone shade
+    // first, which starts the activity on display 0 and delays the PC window.
+    if (isFusion) {
+      await launch(apps.value.find(app => app.packageName === notice.packageName) || {
+        packageName: notice.packageName,
+        name: notice.appName,
+        icon: notice.icon,
+      })
+      return
+    }
     const result = await window.$preload.ipcRenderer.invoke(
       'desktop-notification-action',
       { deviceId, action: 'open', key: notice.key },
@@ -2811,6 +2831,23 @@ function toggleMute() {
   }
   setLevel('volume')
 }
+const notificationSetupBusy = ref(false)
+async function refreshNotificationCompanion() {
+  notificationSetupBusy.value = true
+  try {
+    await window.$preload.ipcRenderer.invoke('desktop-notification-refresh', deviceId)
+  }
+  catch (error) { notify(error.message) }
+  finally { notificationSetupBusy.value = false }
+}
+function notificationSourceChanged(_event, active) {
+  notificationPushActive.value = Boolean(active)
+}
+function notificationPushed(_event, notices) {
+  notifications.value = notices
+  knownNotifications = new Map(notices.map(notice => [notice.key, `${notice.title}\n${notice.text}`]))
+  notificationSeeded = true
+}
 async function readNotifications(background = false) {
   if (
     notificationPolling
@@ -2834,8 +2871,10 @@ async function readNotifications(background = false) {
     for (const notice of notices) {
       const fingerprint = `${notice.title}\n${notice.text}`
       if (
-        notificationSeeded
+        !isFusion
+        && notificationSeeded
         && background
+        && !notice.ongoing
         && panel.value !== 'notifications'
         && knownNotifications.get(notice.key) !== fingerprint
       ) {
@@ -2888,7 +2927,7 @@ async function refresh(force = false) {
       bootStep.value = '初始化桌面控制'
       if (!isFusion)
         await readState()
-      if (!isFusion && !notificationSeeded)
+      if (!isFusionApp && !notificationSeeded)
         readNotifications(true)
       const battery = await window.$preload.ipcRenderer
         .invoke('desktop-device-battery', deviceId)
@@ -3077,6 +3116,9 @@ watch(
 )
 onMounted(() => {
   tick()
+  window.$preload.ipcRenderer.on('desktop-notification-source', notificationSourceChanged)
+  window.$preload.ipcRenderer.on('desktop-notification-push', notificationPushed)
+  window.$preload.ipcRenderer.on('desktop-open-notification', openDesktopNotification)
   window.$preload.ipcRenderer.on('fusion-launcher-blur', fusionBlur)
   window.$preload.ipcRenderer.on('fusion-launcher-open', fusionOpen)
   window.$preload.ipcRenderer.on('desktop-host-fullscreen', hostFullscreenChanged)
@@ -3086,8 +3128,12 @@ onMounted(() => {
     preferencesReady = true
     refresh(true)
   })
-  if (!isFusionApp)
-    notificationPollTimer = setInterval(() => readNotifications(true), 4000)
+  if (!isFusionApp) {
+    notificationPollTimer = setInterval(() => {
+      if (!notificationPushActive.value)
+        readNotifications(true)
+    }, 4000)
+  }
   clockTimer = setInterval(tick, 1000)
   refreshTimer = setInterval(() => refresh(), 2500)
   wallpaperTimer = setInterval(() => {
@@ -3126,6 +3172,9 @@ onBeforeUnmount(() => {
   window.$preload.ipcRenderer.removeListener('fusion-launcher-open', fusionOpen)
   window.$preload.ipcRenderer.removeListener('desktop-host-fullscreen', hostFullscreenChanged)
   window.$preload.ipcRenderer.removeListener('desktop-fullscreen-exit', exitFullscreen)
+  window.$preload.ipcRenderer.removeListener('desktop-notification-source', notificationSourceChanged)
+  window.$preload.ipcRenderer.removeListener('desktop-notification-push', notificationPushed)
+  window.$preload.ipcRenderer.removeListener('desktop-open-notification', openDesktopNotification)
   window.$preload.ipcRenderer.removeListener('fusion-attach-task', fusionAttachTask)
   clearInterval(controlPoll)
   ++controlGeneration
@@ -5247,5 +5296,20 @@ select:focus-visible {
 }
 .fusion-app .fusion-app-settings {
   top: 36px;
+}
+</style>
+
+<style scoped>
+.notification-link-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ui-secondary);
+}
+.notification-link-status button {
+  border: 1px solid currentColor;
+  padding: 3px 6px;
+  border-radius: 7px;
 }
 </style>

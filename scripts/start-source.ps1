@@ -30,6 +30,9 @@ $env:PATH=(Split-Path -Parent $node)+';'+$env:PATH
 Push-Location -LiteralPath $desktop
 try {
   Write-Output 'Starting Yanjiu-scrcpy from source. Use the tray Exit command to quit.'
+  # Windows PowerShell treats redirected native stderr as terminating errors.
+  $ErrorActionPreference='Continue'
   & $node $vite dev --host 127.0.0.1 --strictPort *> (Join-Path $logs 'Yanjiu-scrcpy-startup.log')
+  $ErrorActionPreference='Stop'
   if($LASTEXITCODE -ne 0){throw "Source startup failed. See $logs\Yanjiu-scrcpy-startup.log. Port 1535 may already be in use."}
 } finally {Pop-Location}

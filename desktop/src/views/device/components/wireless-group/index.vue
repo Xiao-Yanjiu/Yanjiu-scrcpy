@@ -1,6 +1,6 @@
 <template>
-  <div class="flex items-center flex-none !space-x-2">
-    <div class="w-72 flex-none">
+  <div class="wireless-connect-controls">
+    <div class="wireless-address">
       <el-autocomplete
         :key="autocompleteKey"
         ref="elAutocompleteRef"
@@ -45,7 +45,7 @@
       </el-autocomplete>
     </div>
 
-    <div class="flex-none overflow-hidden transition-all duration-300" :class="pairVisible ? 'w-26' : 'w-0 !mx-0'">
+    <div v-show="pairVisible" class="wireless-pair flex-none overflow-hidden transition-all duration-300" :class="pairVisible ? 'w-26' : 'w-0 !mx-0'">
       <el-input
         v-model="pairCode"
         class="!w-full"
@@ -64,7 +64,7 @@
         class="flex-none"
         @click="handleConnect()"
       >
-        {{ $t('device.wireless.connect.name') }}
+        连接
       </el-button>
 
       <el-button
@@ -283,5 +283,37 @@ defineExpose({
 })
 </script>
 
-<style lang="postcss" scoped>
+<style scoped>
+.wireless-connect-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  min-width: 0;
+}
+.wireless-address,
+.wireless-pair {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+.wireless-connect-controls :deep(.el-button) {
+  width: 100%;
+  padding: 4px;
+  height: 28px;
+  font-size: 12px;
+  margin: 0;
+  min-width: 0;
+}
+.wireless-connect-controls :deep(.el-button > span) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wireless-connect-controls :deep(.el-input__wrapper) {
+  min-height: 32px;
+  height: 32px;
+  box-sizing: border-box;
+}
+.wireless-connect-controls :deep(.el-input-group__prepend) {
+  padding: 0 10px;
+}
 </style>
