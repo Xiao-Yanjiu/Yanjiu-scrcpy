@@ -66,6 +66,7 @@ export default {
       hooks: {
         async created(win) {
           mainWindow = win
+          win.webContents.setBackgroundThrottling(false)
           for (const event of ['blur', 'closed', 'maximize', 'enter-full-screen'])
             win.on(event, stopResize)
           const update = () => {

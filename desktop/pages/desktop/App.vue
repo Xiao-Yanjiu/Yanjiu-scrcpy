@@ -228,12 +228,6 @@
           {{ connected ? "没有匹配的应用" : "连接手机后显示应用" }}
         </div>
         <footer class="menu-footer">
-          <div v-if="isFusionLauncher" class="notification-link-status">
-            <span>{{ notificationPushActive ? '通知助手已连接' : '通知助手未连接 · 4秒检查' }}</span>
-            <button v-if="!notificationPushActive" :disabled="!connected || notificationSetupBusy" @click="refreshNotificationCompanion">
-              {{ notificationSetupBusy ? '刷新中…' : '刷新' }}
-            </button>
-          </div>
           <span><span class="connection-dot" :class="{ online: connected }"></span>{{ device?.name || "Android" }}</span><button
             class="icon-button"
             :title="isFusionLauncher ? '退出桌面模式' : '控制中心'"
@@ -283,86 +277,6 @@
           </button>
         </div>
         <label class="adb-volume"><DeskIcon :name="phoneState.volume ? 'volume' : 'mute'" /><input v-model.number="phoneState.volume" type="range" min="0" max="100" aria-label="媒体音量" @pointerdown="levelChanges.volume.editing = true" @pointerup="levelChanges.volume.editing = false" @pointercancel="levelChanges.volume.editing = false" @input="queueLevel('volume', $event.target.value)" @change="setLevel('volume')" /><span>{{ phoneState.volume }}%</span></label>
-      </aside>
-    </Transition>
-
-    <Transition
-      name="panel"
-      @before-enter="animatePanels"
-      @before-leave="animatePanels"
-      @after-enter="queueLayout"
-      @after-leave="queueLayout"
-    >
-      <aside
-        v-if="panel === 'notifications'"
-        class="notification-panel glass"
-        data-native-overlay
-      >
-        <div class="panel-heading">
-          <strong>通知中心</strong><button
-            class="clear-notifications"
-            :disabled="
-              notificationBusy
-                || !notifications.some((notice) => notice.dismissible ?? !notice.ongoing)
-            "
-            @click="clearNotifications"
-          >
-            清空
-          </button><button class="icon-button" title="刷新" @click="readNotifications">
-            <DeskIcon name="refresh" />
-          </button>
-        </div>
-        <p v-if="notificationsLoading" class="muted">
-          正在同步通知…
-        </p>
-        <p v-else-if="!notifications.length" class="notification-empty">
-          暂无通知
-        </p>
-        <section
-          v-for="group in notificationGroups"
-          :key="group.groupId"
-          class="notification-group"
-          :class="{ collapsed: group.items.length > 1 && !expandedNotificationGroups.has(group.groupId) }"
-        >
-          <header class="notification-app-heading">
-            <img v-if="group.icon" :src="group.icon" alt="" /><DeskIcon
-              v-else
-              name="app"
-            />
-            <span>{{ group.appName }}</span><small v-if="group.items.length > 1">{{
-              group.items.length
-            }}</small><button v-if="group.items.length > 1" class="icon-button notification-expand" :aria-expanded="expandedNotificationGroups.has(group.groupId)" title="展开／收起通知" @click="expandedNotificationGroups.has(group.groupId) ? expandedNotificationGroups.delete(group.groupId) : expandedNotificationGroups.add(group.groupId)">
-              <DeskIcon :name="expandedNotificationGroups.has(group.groupId) ? 'chevronUp' : 'chevronDown'" />
-            </button>
-          </header>
-          <article
-            v-for="notice in group.items"
-            :key="notice.key"
-            class="phone-notification"
-            role="button"
-            tabindex="0"
-            @click="openNotification(notice)"
-            @keydown.enter.self.prevent="openNotification(notice)"
-            @keydown.space.self.prevent="openNotification(notice)"
-          >
-            <header>
-              <strong>{{ notice.title || group.appName }}</strong><time v-if="notice.time">{{
-                notificationTime(notice.time)
-              }}</time><button
-                v-if="notice.dismissible ?? !notice.ongoing"
-                class="icon-button notification-dismiss"
-                title="移除通知"
-                :disabled="!!notificationBusy"
-                @click.stop="dismissNotification(notice)"
-              >
-                <DeskIcon name="close" />
-              </button>
-            </header>
-            <p v-if="notice.text && notice.text !== notice.title">
-              {{ notice.text }}
-            </p>
-          </article>
-        </section>
       </aside>
     </Transition>
 
@@ -581,8 +495,7 @@
         </button>
         <button
           class="tray-clock"
-          title="通知中心"
-          @click="openPanel('notifications')"
+          title="时间"
         >
           <span>{{ clock }}</span><span>{{ date }}</span>
         </button>
@@ -657,50 +570,7 @@
         </button>
       </aside>
     </Transition>
-    <TransitionGroup
-      name="panel"
-      tag="div"
-      class="notification-banners"
-      @before-enter="animatePanels"
-      @before-leave="animatePanels"
-      @after-enter="queueLayout"
-      @after-leave="queueLayout"
-    >
-      <article
-        v-for="banner in notificationBanners"
-        :key="banner.id"
-        class="notification-banner glass"
-        data-native-overlay
-        role="button"
-        tabindex="0"
-        @click="
-          openNotification(banner.notice);
-          dismissBanner(banner.id);
-        "
-        @keydown.enter.prevent="
-          openNotification(banner.notice);
-          dismissBanner(banner.id);
-        "
-        @mouseenter="pauseBanner(banner.id)"
-        @mouseleave="resumeBanner(banner.id)"
-      >
-        <header>
-          <img
-            v-if="banner.notice.icon"
-            :src="banner.notice.icon"
-            alt=""
-          /><strong>{{ banner.notice.appName }}</strong><button
-            class="icon-button"
-            title="关闭提示"
-            @click.stop="dismissBanner(banner.id)"
-          >
-            <DeskIcon name="close" />
-          </button>
-        </header>
-        <strong>{{ banner.notice.title }}</strong>
-        <p>{{ banner.notice.text }}</p>
-      </article>
-    </TransitionGroup>
+
     <div
       v-if="!isFusionApp && fullscreenId"
       class="fullscreen-float"
@@ -859,10 +729,10 @@ const notificationBanners = ref([])
 const notificationBusy = ref('')
 const bannerTimers = new Map()
 let bannerSequence = 0
-let notificationSeeded = false
-let notificationPolling = false
-let knownNotifications = new Map()
-let notificationPollTimer = 0
+const notificationSeeded = false
+const notificationPolling = false
+const knownNotifications = new Map()
+const notificationPollTimer = 0
 const notificationPushActive = ref(false)
 const draggingTask = ref('')
 let lastTaskDrop = 0
@@ -2832,71 +2702,9 @@ function toggleMute() {
   setLevel('volume')
 }
 const notificationSetupBusy = ref(false)
-async function refreshNotificationCompanion() {
-  notificationSetupBusy.value = true
-  try {
-    await window.$preload.ipcRenderer.invoke('desktop-notification-refresh', deviceId)
-  }
-  catch (error) { notify(error.message) }
-  finally { notificationSetupBusy.value = false }
+async function readNotifications() {
+  return []
 }
-function notificationSourceChanged(_event, active) {
-  notificationPushActive.value = Boolean(active)
-}
-function notificationPushed(_event, notices) {
-  notifications.value = notices
-  knownNotifications = new Map(notices.map(notice => [notice.key, `${notice.title}\n${notice.text}`]))
-  notificationSeeded = true
-}
-async function readNotifications(background = false) {
-  if (
-    notificationPolling
-    || (background && (!connected.value || notificationBusy.value))
-  ) {
-    return
-  }
-  const request = ++notificationRequest
-  notificationPolling = true
-  if (!background)
-    notificationsLoading.value = true
-  try {
-    const notices = await window.$preload.ipcRenderer.invoke(
-      'desktop-notifications',
-      deviceId,
-      { details: background !== true || panel.value === 'notifications' },
-    )
-    if (request !== notificationRequest)
-      return
-    const next = new Map()
-    for (const notice of notices) {
-      const fingerprint = `${notice.title}\n${notice.text}`
-      if (
-        !isFusion
-        && notificationSeeded
-        && background
-        && !notice.ongoing
-        && panel.value !== 'notifications'
-        && knownNotifications.get(notice.key) !== fingerprint
-      ) {
-        addBanner(notice)
-      }
-      next.set(notice.key, fingerprint)
-    }
-    knownNotifications = next
-    notificationSeeded = true
-    notifications.value = notices
-  }
-  catch (error) {
-    if (!background)
-      notify(error.message)
-  }
-  finally {
-    notificationPolling = false
-    if (request === notificationRequest)
-      notificationsLoading.value = false
-  }
-}
-
 async function refresh(force = false) {
   if (refreshing || !preferencesReady)
     return
@@ -3116,9 +2924,6 @@ watch(
 )
 onMounted(() => {
   tick()
-  window.$preload.ipcRenderer.on('desktop-notification-source', notificationSourceChanged)
-  window.$preload.ipcRenderer.on('desktop-notification-push', notificationPushed)
-  window.$preload.ipcRenderer.on('desktop-open-notification', openDesktopNotification)
   window.$preload.ipcRenderer.on('fusion-launcher-blur', fusionBlur)
   window.$preload.ipcRenderer.on('fusion-launcher-open', fusionOpen)
   window.$preload.ipcRenderer.on('desktop-host-fullscreen', hostFullscreenChanged)
@@ -3128,12 +2933,6 @@ onMounted(() => {
     preferencesReady = true
     refresh(true)
   })
-  if (!isFusionApp) {
-    notificationPollTimer = setInterval(() => {
-      if (!notificationPushActive.value)
-        readNotifications(true)
-    }, 4000)
-  }
   clockTimer = setInterval(tick, 1000)
   refreshTimer = setInterval(() => refresh(), 2500)
   wallpaperTimer = setInterval(() => {
@@ -3172,9 +2971,6 @@ onBeforeUnmount(() => {
   window.$preload.ipcRenderer.removeListener('fusion-launcher-open', fusionOpen)
   window.$preload.ipcRenderer.removeListener('desktop-host-fullscreen', hostFullscreenChanged)
   window.$preload.ipcRenderer.removeListener('desktop-fullscreen-exit', exitFullscreen)
-  window.$preload.ipcRenderer.removeListener('desktop-notification-source', notificationSourceChanged)
-  window.$preload.ipcRenderer.removeListener('desktop-notification-push', notificationPushed)
-  window.$preload.ipcRenderer.removeListener('desktop-open-notification', openDesktopNotification)
   window.$preload.ipcRenderer.removeListener('fusion-attach-task', fusionAttachTask)
   clearInterval(controlPoll)
   ++controlGeneration

@@ -1,7 +1,5 @@
-import { createNotificationRelay, notificationCompanionInstalled, notificationPackage } from './notification-relay.js'
 import { createHash } from 'node:crypto'
 import store from '$electron/helpers/store/index.js'
-import { registerFloatingTarget } from './window.js'
 import { extraResolve } from '$electron/process/resources.js'
 import { globalEventEmitter } from '$electron/helpers/emitter/index.js'
 import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs'
@@ -140,29 +138,12 @@ const taskStreamStarts = new Map()
 const deviceInputFocus = new Map()
 const latestInputIntent = new Map()
 const batteryReadings = new Map()
-const notificationRelay = createNotificationRelay({
-  adb,
-  sourceChanged(owner, active) {
-    if (owner.notificationPushActive !== active) {
-      owner.notificationPushActive = active
-      globalEventEmitter.emit('desktop:notification-source-changed', owner)
-    }
-    owner.webContents.send('desktop-notification-source', active)
-  },
-  publish(owner, notices, _deviceId, posted) {
-    owner.webContents.send('desktop-notification-push', notices)
-    if (owner.fusionRole === 'launcher')
-      globalEventEmitter.emit('desktop:notification-snapshot', { owner, notices, posted, background: true })
-  },
-})
-app.once('before-quit', () => notificationRelay.close())
-
 const notificationApps = new Map()
 const notificationReads = new Map()
 const notificationDetails = new Map()
 const routedCalls = new Map()
 const controlId = '__desktop_control__'
-let notificationActionQueue = Promise.resolve()
+const notificationActionQueue = Promise.resolve()
 const agentRemote = '/data/local/tmp/yanjiu-scrcpy-desktop-agent.jar'
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -1043,20 +1024,6 @@ function ownerFor(event) {
         return
       if (!id)
         owner.focused = null
-      if (process.platform === 'win32' && win.fusionRole === 'app' && !app.bossHidden && !win.floatingTransition && win.isVisible() && !win.isFocused() && !owner.coverageChecking) {
-        owner.coverageChecking = true
-        const covered = await owner.bridge.request('covered').catch(() => false).finally(() => {
-          owner.coverageChecking = false
-        })
-        owner.coveredSince = covered ? owner.coveredSince || Date.now() : 0
-        if (owner.coveredSince && Date.now() - owner.coveredSince > 900) {
-          owner.coveredSince = 0
-          await win.fusionMinimize?.()
-        }
-      }
-      else {
-        owner.coveredSince = 0
-      }
       if ((!owner.hostInput || owner.sessions.get(id)?.mirror) && id && id !== owner.focused && Date.now() >= (owner.focusRetryAt || 0)) {
         confirmAppInputFocus(owner, id)
         emit(owner, 'desktop-app-activated', id)
@@ -1721,6 +1688,11 @@ export default {
     })
     globalEventEmitter.on('boss:visibility', (hidden) => {
       for (const owner of owners.values()) {
+        owner.focused = null
+        owner.focusRetryAt = 0
+        owner.hostInput = false
+        if (!hidden && !owner.closed)
+          owner.bridge.request('host-input', { active: false }).catch(() => {})
         if (owner.phoneMirror && !owner.phoneMirror.killed && owner.phoneMirror.exitCode === null) {
           owner.bridge.request('mirror-visibility', { pid: owner.phoneMirror.pid, title: '手机镜像', hidden })
             .catch(error => sessionLog({ action: 'mirror-boss-visibility', error: error.message }))
@@ -1839,66 +1811,6 @@ export default {
         if (process.platform === 'win32') {
           child.once('exit', () => owner.bridge.request('mirror-icon-release', { pid: child.pid }).catch(() => {}))
           await owner.bridge.request('mirror-icon', { pid: child.pid, title: '手机镜像', icon: extraResolve('common/phone-mirror/phone-mirror.ico') }).catch(error => sessionLog({ event: 'mirror-icon-error', error: error.message }))
-        }
-        if (owner.win.fusionRole) {
-          let minimized = false
-          let coveredSince = 0
-          let checking = false
-          let transitioning = false
-          let floating
-          const transition = async (opening) => {
-            if (process.platform !== 'win32')
-              return false
-            const point = screen.dipToScreenPoint({ x: floating.position.x + 40, y: floating.position.y + 40 })
-            transitioning = true
-            try {
-              return await owner.bridge.request('mirror-transition', { pid: child.pid, title: '手机镜像', opening, ...point })
-            }
-            finally { transitioning = false }
-          }
-          floating = registerFloatingTarget({ nativeFocus: true, name: '手机镜像', icon: nativeImage.createFromPath(extraResolve('common/phone-mirror/scrcpy.png')).toDataURL(), isMinimized: () => minimized, restore: async () => {
-            if (transitioning)
-              return
-            await transition(true)
-            const focused = await owner.bridge.request('mirror-focus', { pid: child.pid, title: '手机镜像' })
-            if (!focused)
-              throw new Error('镜像窗口不可用')
-            minimized = false
-          } })
-          await owner.bridge.request('mirror-floating', { pid: child.pid, title: '手机镜像' })
-          const timer = setInterval(async () => {
-            if (checking || transitioning || app.bossHidden || owner.closed)
-              return
-            checking = true
-            try {
-              const state = await owner.bridge.request('mirror-floating', { pid: child.pid, title: '手机镜像' })
-              if (state === 'minimized') {
-                if (!minimized)
-                  await transition(false)
-                minimized = true
-              }
-              if (state === 'visible') {
-                minimized = false
-                const covered = process.platform === 'win32' && await owner.bridge.request('mirror-covered', { pid: child.pid, title: '手机镜像' })
-                coveredSince = covered ? coveredSince || Date.now() : 0
-                if (coveredSince && Date.now() - coveredSince > 900) {
-                  await transition(false)
-                  minimized = true
-                  coveredSince = 0
-                }
-              }
-              else {
-                coveredSince = 0
-              }
-              await floating.update()
-            }
-            catch (error) { sessionLog({ event: 'mirror-floating-error', error: error.message }) }
-            finally { checking = false }
-          }, 350)
-          child.once('exit', () => {
-            clearInterval(timer)
-            floating.dispose()
-          })
         }
         if (app.bossHidden)
           await owner.bridge.request('mirror-visibility', { pid: child.pid, title: '手机镜像', hidden: true })
@@ -2100,13 +2012,6 @@ export default {
         return false
       return confirmAppInputFocus(owner, id)
     })
-    ipcMain.handle('desktop-phone-command', (event, { deviceId, command }) => {
-      desktopWindow(event)
-      const allowed = new Set(['dumpsys notification --noredact'])
-      if (!allowed.has(command))
-        throw new Error('不支持此手机操作')
-      return checkedShell(serial(deviceId), command)
-    })
     ipcMain.handle(
       'desktop-control-action',
       async (event, { deviceId, key, enabled }) => {
@@ -2167,34 +2072,6 @@ export default {
       })
       return pending
     })
-    ipcMain.handle('desktop-notification-action', (event, request) => {
-      const owner = ownerFor(event)
-      const deviceId = serial(request.deviceId)
-      if (!['open', 'dismiss', 'clear'].includes(request.action))
-        throw new Error('通知操作无效')
-      const operation = async () => {
-        const notices = await readPhoneNotifications(deviceId)
-        const notice
-          = request.action === 'clear'
-            ? {}
-            : notices.find(item => item.key === request.key)
-        if (!notice)
-          throw new Error('这条通知已移除，请刷新列表')
-        if (request.action === 'dismiss' && !notice.dismissible)
-          throw new Error('手机系统不允许移除此常驻通知')
-        const displayId
-          = [...owner.sessions.values()].find(
-            session => session.packageName === notice.packageName,
-          )?.displayId || 0
-        const payload = Buffer.from(
-          JSON.stringify({ ...notice, action: request.action, displayId }),
-        ).toString('base64')
-        return agent(deviceId, `notification-ui ${payload}`)
-      }
-      const result = notificationActionQueue.catch(() => {}).then(operation)
-      notificationActionQueue = result.catch(() => {})
-      return result
-    })
     ipcMain.handle(
       'desktop-notification-attach',
       async (event, { packageName, taskId }) => {
@@ -2210,41 +2087,7 @@ export default {
         )
       },
     )
-    ipcMain.handle('desktop-notification-setup', async (event, deviceId, options) => {
-      if (!BrowserWindow.fromWebContents(event.sender))
-        throw new Error('窗口不可用')
-      const id = serial(deviceId)
-      // Installation is invoked only by the explicit setup button.
-      const installed = await notificationCompanionInstalled(adb, id)
-      if (!installed && options?.install !== true)
-        throw new Error('通知助手尚未安装，请到设置中点击“安装／设置通知助手”')
-      if (options?.install === true) {
-        // Explicit setup also updates the bundled helper; reconnects never install.
-        const output = await adb(id, ['install', '-r', extraResolve('common/notification-companion.apk')], { timeout: 120000 })
-        if (!/Success/.test(output))
-          throw new Error('手机安装未完成，请确认手机上的安装提示')
-      }
-      await adb(id, ['shell', 'am', 'start', '-n', `${notificationPackage}/.SetupActivity`])
-      notificationRelay.retry(id)
-      return { success: true }
-    })
-    ipcMain.handle('desktop-notification-refresh', async (event, deviceId) => {
-      const owner = desktopWindow(event)
-      const id = serial(deviceId)
-      notificationRelay.retry(id)
-      await notificationRelay.read(owner, id)
-      return { connected: Boolean(owner.notificationPushActive) }
-    })
-    ipcMain.handle('desktop-notifications', async (event, deviceId, options) => {
-      const owner = desktopWindow(event)
-      const id = serial(deviceId)
-      const pushed = await notificationRelay.read(owner, id)
-      const notices = pushed ?? await readPhoneNotifications(id, options?.details !== false)
-      if (owner.fusionRole === 'launcher' && !owner.isDestroyed()) {
-        globalEventEmitter.emit('desktop:notification-snapshot', { owner, notices, background: options?.details === false })
-      }
-      return notices
-    })
+    ipcMain.handle('desktop-notifications', async () => [])
     ipcMain.handle('desktop-device-state', async (event, deviceId) => {
       desktopWindow(event)
       return readPhoneState(serial(deviceId))

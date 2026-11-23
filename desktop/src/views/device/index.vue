@@ -65,7 +65,6 @@ import DevicePopover from './components/device-popover/index.vue'
 import { getDictLabel } from '$/dicts/helper'
 
 const deviceStore = useDeviceStore()
-const preferenceStore = usePreferenceStore()
 
 function openFusion(row) {
   window.$preload.win.open('pages/desktop', { device: toRaw(row), fusionRole: 'launcher', show: false, instanceId: `fusion:${row.id}` })
@@ -81,8 +80,6 @@ const deviceList = computed({
   },
 })
 
-const autoFusionDevices = new Set()
-
 async function getDeviceData(options = {}) {
   const { unloading = false } = options
 
@@ -94,25 +91,6 @@ async function getDeviceData(options = {}) {
     loadError.value = ''
     await deviceStore.getList()
     loading.value = false
-    const available = new Set(deviceStore.list.filter(item => item.status === 'device').map(item => item.id))
-    for (const id of autoFusionDevices) {
-      if (!available.has(id))
-        autoFusionDevices.delete(id)
-    }
-    if (preferenceStore.data.fusionAutoOpen) {
-      for (const device of deviceStore.list) {
-        if (device.status !== 'device' || autoFusionDevices.has(device.id))
-          continue
-        autoFusionDevices.add(device.id)
-        try {
-          await window.$preload.win.open('pages/desktop', { device: toRaw(device), fusionRole: 'launcher', show: false, instanceId: `fusion:${device.id}` })
-        }
-        catch (error) {
-          autoFusionDevices.delete(device.id)
-          console.warn('自动打开桌面模式失败', error)
-        }
-      }
-    }
   }
   catch (error) {
     const message = error?.message || error?.cause?.message || ''
@@ -152,12 +130,25 @@ async function handleRefresh() {
 
 let unAdbWatch = null
 
+let disposed = false
 onMounted(async () => {
-  await getDeviceData()
-  unAdbWatch = await window.$preload.adb.watch(onAdbWatch)
+  try {
+    const stop = await window.$preload.adb.watch(onAdbWatch)
+    if (disposed) {
+      stop?.()
+      return
+    }
+    unAdbWatch = stop
+  }
+  catch (error) {
+    console.warn('Device watcher:', error.message)
+  }
+  if (!disposed)
+    await getDeviceData()
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   unAdbWatch?.()
 })
 

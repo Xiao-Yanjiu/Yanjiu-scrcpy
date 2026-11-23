@@ -94,7 +94,7 @@ const preferenceData = defineModel('modelValue', {
 const preferenceStore = usePreferenceStore()
 
 const preferenceModel = computed(() => {
-  const removed = new Set(['theme', 'appCloseCode', 'saveDir', 'adbDir', 'gnirehtetDir', 'scrcpyDir', 'concurrencyLimit', 'scrcpyAppend', 'gnirehtetAppend', 'environmentVariables', 'autoMirror', 'floatControl', 'edgeHidden', 'gnirehtetFix', 'debug'])
+  const removed = new Set(['theme', 'saveDir', 'adbDir', 'gnirehtetDir', 'scrcpyDir', 'concurrencyLimit', 'scrcpyAppend', 'gnirehtetAppend', 'environmentVariables', 'autoMirror', 'floatControl', 'edgeHidden', 'gnirehtetFix', 'debug'])
   const common = preferenceStore.model.common
   const children = Object.fromEntries(Object.entries(common.children).filter(([key]) => !removed.has(key)))
   return { common: { ...common, label: '设置', children: { ...children, ...preferenceStore.model.fusion.children } } }

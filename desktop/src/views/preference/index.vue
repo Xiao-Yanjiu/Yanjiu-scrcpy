@@ -12,7 +12,6 @@
             <h2>无线桌面连接</h2>
             <WirelessGroup :handle-refresh="refreshDevices" />
           </article>
-          <NotificationCompanion />
         </template>
       </PreferenceForm>
     </div>
@@ -23,7 +22,6 @@
 import { debounce } from 'lodash-es'
 
 import WirelessGroup from '../device/components/wireless-group/index.vue'
-import NotificationCompanion from './components/notification-companion.vue'
 
 import PreferenceForm from '$/components/preference-form/index.vue'
 

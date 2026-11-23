@@ -16,16 +16,16 @@ function toggleBossWindows() {
       if (win.isDestroyed())
         continue
       win.setSkipTaskbar(Boolean(win.keepTaskbarHidden))
-      if (win.fusionRole === 'app' && (state.minimized || state.fusionMinimized || !state.visible)) {
-        win.hide()
-        continue
-      }
       if (state.minimized) {
         win.showInactive()
         win.minimize()
       }
       else if (state.visible) {
         win.show()
+        if (win.fusionRole === 'app') {
+          win.focus()
+          win.webContents.focus()
+        }
       }
     }
     globalEventEmitter.emit('boss:visibility', false)

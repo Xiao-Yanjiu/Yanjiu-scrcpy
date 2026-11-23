@@ -117,15 +117,6 @@ const wirelessList = computed(() =>
 )
 
 onMounted(() => {
-  const unwatch = watch(
-    wirelessList,
-    async (val) => {
-      unwatch()
-      if (!val)
-        return
-      handleConnectAuto()
-    },
-  )
   getAddress()
 })
 
